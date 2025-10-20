@@ -66,4 +66,3 @@ jobs:
           name: openwrt-cudy-wr3000
           path: ~/openwrt/bin/targets/mediatek/filogic/
           if-no-files-found: warn
-```
