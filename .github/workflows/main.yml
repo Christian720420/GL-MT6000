@@ -28,7 +28,6 @@ env:
 
 jobs:
   build:
-    runs-on: self-hosted:osboxes
     steps:
       - name: Verify Runner Environment
         run: |
