@@ -24,12 +24,6 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
-      - name: Install dependencies
-        run: |
-          sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '
-          sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm git
-          sudo apt autoremove -y && sudo apt clean -y
-
       - name: Clone OpenWrt source
         run: |
           git clone --depth=1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
