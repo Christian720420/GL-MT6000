@@ -1,0 +1,78 @@
+name: Build OpenWrt Firmware
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "38 1 * * *"
+
+env:
+  OPENWRT_REPO: https://github.com/openwrt/openwrt.git
+  OPENWRT_BRANCH: openwrt-24.10
+  CONFIG_FILE: .config
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  build:
+    name: Build OpenWrt (Custom)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '*php*'
+          sudo apt update -y && sudo apt upgrade -y
+          sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm git
+          sudo apt autoremove -y && sudo apt clean -y
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth=1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Copy custom configuration and files
+        run: |
+          cd openwrt
+          cp -v ../${{ env.CONFIG_FILE }} .config
+          [ -d ../files ] && cp -r ../files ./ || true
+          make defconfig
+
+      - name: Build firmware
+        run: |
+          cd openwrt
+          make download -j$(nproc) || { echo "Retrying download..."; sleep 30; make download -j1 V=s; }
+          make -j$(nproc) || { echo "Retrying build..."; sleep 30; make -j1 V=s; }
+          mkdir -p ../firmware
+          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
+          mv .config ../firmware/full.config ||:
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-firmware
+          path: firmware/*
+
+      - name: Create release
+        run: |
+          RELEASE_DATE=$(date +%F)
+          gh release delete "openwrt-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
+          gh release create "openwrt-${RELEASE_DATE}" \
+            --repo "${{ github.repository }}" \
+            --latest \
+            --title "OpenWrt Custom Build (${RELEASE_DATE})" \
+            --notes "Custom OpenWrt firmware built from branch **${{ env.OPENWRT_BRANCH }}** with config \`${{ env.CONFIG_FILE }}\`." \
+            firmware/*
+
+      - name: Clean up old releases
+        run: |
+          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read id tag; do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
+          done
