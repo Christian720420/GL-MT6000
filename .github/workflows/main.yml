@@ -1,66 +1,124 @@
-name: Build OpenWrt 24.10.3 for Cudy WR3000
+name: Build OpenWrt for Cudy WR3000
+
+permissions:
+  contents: write
+  actions: write
 
 on:
   workflow_dispatch:
-    inputs:
-      openwrt_revision:
-        description: 'OpenWrt Revision (e.g., r28872-daca7c049b)'
-        required: true
-        default: 'r28872-daca7c049b'
-        type: string
-      luci_commit:
-        description: 'LuCI Commit (e.g., 923f8d9)'
-        required: true
-        default: '923f8d9'
-        type: string
-      custom_config:
-        description: 'Custom Config Snippet (optional, e.g., "CONFIG_PACKAGE_wireguard-tools=y")'
-        required: false
-        default: ''
-        type: string
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "38 1 * * *"
 
 env:
-  REPO_URL: https://git.openwrt.org/openwrt/openwrt.git
-  LUCI_URL: https://github.com/openwrt/luci.git
-  BUILD_ROOT: ${{ github.workspace }}/openwrt
-  TZ: UTC  # Adjust to your timezone, e.g., 'America/New_York'
+  REMOTE_REPOSITORY: pesa1234/openwrt
+  CONFIG_FILE: wr3000.config
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
-  build:
-    name: Build Firmware
-    runs-on: self-hosted  # Use your self-hosted runner label if customized
-
+  check_commits:
+    name: Check for new commits
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      remote_branch: ${{ steps.check_commits.outputs.remote_branch }}
+      release_prefix: ${{ steps.check_commits.outputs.release_prefix }}
+      new_commits: ${{ steps.check_commits.outputs.new_commits }}
+      latest_commit_sha: ${{ steps.check_commits.outputs.latest_commit_sha }}
     steps:
-      - name: Initialize Environment
+      - name: Check for new commits in pesa1234 repo
+        id: check_commits
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses5-dev libssl-dev python3 python3-distutils rsync unzip wget zlib1g-dev file libelf-dev ecj javacc ninja-build ccache xsltproc libxml-parser-perl mercurial
-          sudo apt-get clean
-          sudo timedatectl set-timezone "${TZ}"
+          remote_branch=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" | sed -e 's|\(.*heads/\)||' | grep -vi 'test' | sort -V | tail -n1)
+          [ -n "$remote_branch" ] && latest_commit_sha=$(gh api "repos/${{ env.REMOTE_REPOSITORY }}/commits/${remote_branch}" --jq .sha)
+          [ -z "$latest_commit_sha" ] && { echo "*** COULD NOT GET latest_commit_sha FROM remote_branch=$remote_branch ***" ; exit 1; }
+          gh api "repos/${{ github.repository }}/releases/latest" --jq .body 2>/dev/null | grep -q "${latest_commit_sha}" && echo "new_commits=false" >> $GITHUB_OUTPUT || echo "new_commits=true" >> $GITHUB_OUTPUT
+          echo "remote_branch=${remote_branch}" >> $GITHUB_OUTPUT
+          echo "release_prefix=${remote_branch%.rss*}" >> $GITHUB_OUTPUT
+          echo "latest_commit_sha=$latest_commit_sha" >> $GITHUB_OUTPUT
 
-      - name: Maximize Build Space
+  build:
+    name: Build OpenWrt (Cudy WR3000)
+    needs: check_commits
+    if: github.event_name == 'workflow_dispatch' || needs.check_commits.outputs.new_commits == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Install dependencies
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
-          df -h
+          sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '*php*'
+          sudo apt update -y && sudo apt upgrade -y
+          sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
+          sudo apt autoremove -y && sudo apt clean -y
 
-      - name: Checkout OpenWrt Source
-        run: |
-          git clone --depth=1 ${REPO_URL} ${BUILD_ROOT}
-          cd ${BUILD_ROOT}
-          git checkout ${{ github.event.inputs.openwrt_revision || 'r28872-daca7c049b' }}
-          git log -1 --oneline
+      - name: Checkout remote repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REMOTE_REPOSITORY }}
+          ref: ${{ needs.check_commits.outputs.remote_branch }}
 
-      
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          path: "builder_repo"
+
+      - name: Update and install feeds
         run: |
-          cd ${BUILD_ROOT}
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          ./scripts/feeds install -a
 
-      
+      - name: Setup configuration and custom files
         run: |
-          cd ${BUILD_ROOT}
-          sed -i 's|src-git luci https://github.com/openwrt/luci.git$|src-git luci ${LUCI_URL};${{ github.event.inputs.luci_commit || '923f8d9' }}|' feeds.conf.default
-          ./scripts/feeds update luci
-          ./scripts/feeds install -a -p luci
+          mv -v builder_repo/files ./ ||:
+          sed -i 's|XXXXXX/XXXXXX|${{ github.repository }}|' ./files/usr/bin/upgrade_custom_openwrt || true
+          chmod 755 ./files/usr/bin/upgrade_custom_openwrt || true
+          mv -v builder_repo/${{ env.CONFIG_FILE }} .config
+          make defconfig
 
-      
+      - name: Build firmware
+        run: |
+          make download -j$(nproc) || { echo "Retrying download..."; sleep 30; make download -j1 V=s; }
+          make -j$(nproc) || { echo "Retrying build..."; sleep 30; make -j1 V=s; }
+          mkdir -p firmware
+          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ./firmware/ \; ||:
+          mv .config firmware/full.config ||:
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cudy-wr3000-firmware
+          path: firmware/*
+
+      - name: Create release
+        run: |
+          RELEASE_DATE=$(date +%F)
+          gh release delete "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
+          gh release create "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --repo "${{ github.repository }}" --latest --notes "### 🔄 Main Repository
+          - **Repository:** [${{ env.REMOTE_REPOSITORY }}](https://github.com/${{ env.REMOTE_REPOSITORY }})
+          - **Branch:** ${{ needs.check_commits.outputs.remote_branch }}
+          - **Commit:** ${{ needs.check_commits.outputs.latest_commit_sha }}
+          
+          ### 🧩 Device Info
+          - **Brand:** Cudy
+          - **Model:** WR3000 (v1, v2)
+          - **CPU:** MediaTek MT7981BA @1300 MHz (2 cores)
+          - **Flash:** 16 MB
+          - **RAM:** 256 MB
+          - **Wi-Fi:** MT7981BA (2.4 GHz b/g/n/ax) + MT7976CN (5 GHz a/n/ac/ax)
+          - **Ethernet:** 4× 1 Gbit LAN ports
+          - **Release:** OpenWrt 24.10.2
+          - **OEM Page:** [cudy.com](https://www.cudy.com)
+          - **Forum:** [OpenWrt Cudy WR3000](https://forum.openwrt.org/search?q=WR3000)
+          
+          ### ⚙️ Build Configuration
+          - **Config:** [${{ env.CONFIG_FILE }}](${{ env.CONFIG_FILE }})
+          - **Features:** WiFi UCODE, Wireguard VPN, PBR, Adblock Fast
+          - **Removed:** odhcp, upnp, iptables, avahi, samba, usb storage" \
+          --title "OpenWrt Custom Release for Cudy WR3000 (${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE})" firmware/*
+
+      - name: Clean up old releases
+        run: |
+          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read id tag; do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
+          done
