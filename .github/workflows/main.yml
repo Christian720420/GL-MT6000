@@ -29,13 +29,6 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      # 🧹 Clean up old directories (important for self-hosted)
-      - name: Cleanup workspace
-        run: |
-          echo "🧹 Cleaning previous build directories..."
-          sudo rm -rf openwrt firmware source_repo || true
-          mkdir -p ${{ env.CCACHE_DIR }}
-
       # 📦 Checkout your GL-MT6000 repo
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
