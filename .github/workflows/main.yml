@@ -28,7 +28,7 @@ env:
 
 jobs:
   build:
-    runs-on: [self-hosted, osboxes]  # Specify runner label
+    runs-on: self-hosted:openwrt-linux
     steps:
       - name: Verify Runner Environment
         run: |
