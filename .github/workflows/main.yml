@@ -50,17 +50,17 @@ jobs:
           git checkout ${{ github.event.inputs.openwrt_revision || 'r28872-daca7c049b' }}
           git log -1 --oneline
 
-      - name: Update and Install Feeds
+      
         run: |
           cd ${BUILD_ROOT}
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure LuCI Feed
+      
         run: |
           cd ${BUILD_ROOT}
           sed -i 's|src-git luci https://github.com/openwrt/luci.git$|src-git luci ${LUCI_URL};${{ github.event.inputs.luci_commit || '923f8d9' }}|' feeds.conf.default
           ./scripts/feeds update luci
           ./scripts/feeds install -a -p luci
 
-      - name: Configure
+      
