@@ -29,14 +29,21 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      # Checkout your GL-MT6000 repo (the repo that holds .config)
+      # 🧹 Clean previous build directories (important for self-hosted runners)
+      - name: Cleanup workspace
+        run: |
+          echo "🧹 Cleaning previous build directories..."
+          sudo rm -rf openwrt firmware source_repo || true
+          mkdir -p ${{ env.CCACHE_DIR }}
+
+      # 📦 Checkout your GL-MT6000 repo (contains .config and custom files)
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
 
-      # Install required dependencies (runs locally once)
+      # 🛠️ Install required dependencies (only needed once if your runner is fresh)
       - name: Install dependencies
         run: |
           sudo apt update
@@ -46,7 +53,7 @@ jobs:
             autoconf automake pkg-config git curl wget \
             ccache
 
-      # Cache ccache data to speed up rebuilds
+      # ⚡ Cache ccache to speed up rebuilds
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -55,20 +62,26 @@ jobs:
           restore-keys: |
             selfrunner-ccache-
 
-      # Print current ccache stats
+      # 🔍 Show ccache status
       - name: Show ccache status
         run: |
           ccache -s || true
 
-      # Clone OpenWrt source
+      # 🧬 Clone OpenWrt safely (delete existing directory if found)
       - name: Clone OpenWrt
         run: |
+          if [ -d "openwrt/.git" ]; then
+            echo "⚠️ Existing OpenWrt directory found — removing..."
+            rm -rf openwrt
+          fi
+
           git clone --depth=1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
+
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # Copy .config and optional files/
+      # ⚙️ Prepare OpenWrt build (copy config and optional files)
       - name: Prepare OpenWrt build
         run: |
           cd openwrt
@@ -85,27 +98,27 @@ jobs:
 
           make defconfig
 
-      # Build firmware
+      # 🏗️ Build firmware
       - name: Build firmware
         run: |
           cd openwrt
           make download -j1 || { sleep 10; make download -j1 V=s; }
 
-          # Try parallel build, fallback to 1 core if error
-          make -j$(nproc) V=s || { sleep 10; make -j1 V=s; }
+          echo "🚧 Starting OpenWrt build using $(nproc) threads..."
+          make -j$(nproc) V=s || { echo "⚠️ Parallel build failed, retrying with 1 job..."; make -j1 V=s; }
 
           mkdir -p ../firmware
           find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
           mv .config ../firmware/full.config ||:
 
-      # Upload firmware as artifact
+      # 📤 Upload firmware as GitHub artifact
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
           path: firmware/*
 
-      # Create a GitHub release
+      # 🚀 Create a GitHub release
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -114,3 +127,32 @@ jobs:
           set +e
           gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" >/dev/null 2>&1
           set -e
+
+          gh release create "gl-mt6000-${RELEASE_DATE}" \
+            --repo "${{ github.repository }}" \
+            --latest \
+            --title "OpenWrt Custom Build for GL-MT6000 (${RELEASE_DATE})" \
+            --notes "Custom OpenWrt firmware built for **GL-MT6000** using \`${{ env.CONFIG_FILE }}\` from branch **${{ env.OPENWRT_BRANCH }}**." \
+            firmware/*
+
+      # 🧽 Clean up old releases (keep last 6)
+      - name: Clean up old releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | \
+          while read -r id tag; do
+            if [ -n "$id" ]; then
+              echo "Deleting old release $tag"
+              gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
+            fi
+          done
+
+      # 📄 Job summary
+      - name: Summary
+        run: |
+          echo "### ✅ Build Complete for GL-MT6000" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`${{ env.OPENWRT_BRANCH }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Config: \`${{ env.CONFIG_FILE }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Release: [View Release](https://github.com/${{ github.repository }}/releases/latest)" >> $GITHUB_STEP_SUMMARY
