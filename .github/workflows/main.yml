@@ -16,6 +16,7 @@ env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
   GH_TOKEN: ${{ github.token }}
+  CONFIG_FILE: wr3000.config
 
 jobs:
   build:
@@ -23,12 +24,46 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
+      - name: Checkout GL-MT6000 repository
+        uses: actions/checkout@v4
+        with:
+          repository: Christian720420/GL-MT6000
+          path: source_repo
+
       - name: Clone OpenWrt source
         run: |
           git clone --depth=1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: Copy config and custom files
+        run: |
+          cd openwrt
+          export TERM=dumb
+
+          # Copy .config
+          if [ -f "../source_repo/${{ env.CONFIG_FILE }}" ]; then
+            echo "✅ Found config: ../source_repo/${{ env.CONFIG_FILE }}"
+            cp "../source_repo/${{ env.CONFIG_FILE }}" .config
+          else
+            echo "❌ Config file not found: ../source_repo/${{ env.CONFIG_FILE }}"
+            exit 1
+          fi
+
+          # Copy files/ if exists
+          if [ -d "../source_repo/files" ]; then
+            echo "✅ Found custom files directory"
+            cp -r ../source_repo/files ./
+          else
+            echo "ℹ️ No custom 'files/' directory found"
+          fi
+
+          # Non-interactive defconfig
+          make defconfig || {
+            echo "⚠️ defconfig failed, retrying..."
+            TERM=dumb make defconfig
+          }
 
       - name: Build firmware
         run: |
@@ -39,7 +74,7 @@ jobs:
           find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
           mv .config ../firmware/full.config ||:
 
-      - name: Upload build artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
