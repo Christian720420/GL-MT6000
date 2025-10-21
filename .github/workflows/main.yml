@@ -29,7 +29,6 @@ jobs:
   build:
     name: Build Firmware
     runs-on: self-hosted  # Use your self-hosted runner label if customized
-    container: ubuntu:22.04  # Optional: Ensure runner supports containers
 
     steps:
       - name: Initialize Environment
@@ -64,49 +63,4 @@ jobs:
           ./scripts/feeds update luci
           ./scripts/feeds install -a -p luci
 
-      - name: Configure Build for Cudy WR3000
-        run: |
-          cd ${BUILD_ROOT}
-          cat > .config << EOF
-CONFIG_TARGET_mediatek=y
-CONFIG_TARGET_mediatek_filogic=y
-CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_wr3000-v1=y
-CONFIG_PACKAGE_luci=y
-CONFIG_VERSION_NUMBER="24.10.3"
-CONFIG_VERSION_CODE="r28872-daca7c049b"
-EOF
-          # Append custom config if provided
-          if [ -n "${{ github.event.inputs.custom_config }}" ]; then
-            echo "${{ github.event.inputs.custom_config }}" >> .config
-          fi
-          make defconfig
-
-      - name: Download Build Dependencies
-        run: |
-          cd ${BUILD_ROOT}
-          make download -j$(nproc) || make download -j1
-
-      - name: Compile Firmware
-        run: |
-          cd ${BUILD_ROOT}
-          make -j$(nproc) V=s
-          # Optional: Enable ccache (uncomment and set path if pre-configured)
-          # export CCACHE_DIR=/path/to/ccache; ccache -M 10G
-
-      - name: Organize Artifacts
-        id: organize
-        run: |
-          cd ${BUILD_ROOT}/bin/targets/mediatek/filogic/
-          rm -rf packages/
-          (echo '### SHA256SUMS'; echo '```txt'; sha256sum *; echo '```') > SHA256SUMS
-          echo "FIRMWARE=$(pwd)" >> $GITHUB_ENV
-          echo "status=success" >> $GITHUB_OUTPUT
-        if: always()
-
-      - name: Upload Firmware Artifacts
-        uses: actions/upload-artifact@v4
-        if: steps.organize.outputs.status == 'success'
-        with:
-          name: openwrt-cudy-wr3000-24.10.3-${{ github.event.inputs.openwrt_revision || 'r28872-daca7c049b' }}
-          path: ${{ env.FIRMWARE }}/*
-          retention-days: 30
+      - name: Configure
