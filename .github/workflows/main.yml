@@ -1,0 +1,131 @@
+name: Build OpenWrt for Cudy WR3000
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt version'
+        default: 'openwrt-24.10'
+      target:
+        description: 'Target'
+        default: 'mediatek/filogic'
+      profile:
+        description: 'Device profile'
+        default: 'cudy_wr3000-v1'
+      force_clean:
+        description: 'Force clean build (skip cache)'
+        default: 'false'
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly build
+
+env:
+  REPO_URL: https://git.openwrt.org/openwrt/openwrt.git
+  OPENWRT_VERSION: ${{ github.event.inputs.openwrt_version || 'openwrt-24.10' }}
+  TARGET: ${{ github.event.inputs.target || 'mediatek/filogic' }}
+  PROFILE: ${{ github.event.inputs.profile || 'cudy_wr3000-v1' }}
+
+jobs:
+  build:
+    runs-on: [self-hosted, openwrt-linux]  # Specify runner label
+    steps:
+      - name: Verify Runner Environment
+        run: |
+          if [[ ! "$RUNNER_OS" == "Linux" ]]; then
+            echo "Error: This workflow requires a Linux-based self-hosted runner."
+            exit 1
+          fi
+          if ! command -v gcc &> /dev/null; then
+            echo "Error: GCC not found. Ensure build dependencies are installed."
+            exit 1
+          fi
+          df -h  # Log disk space
+          mkdir -p ~/.ccache && chmod -R 777 ~/.ccache  # Ensure ccache directory permissions
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Log Cache Key
+        run: |
+          echo "Primary cache key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ env.TARGET }}-${{ env.PROFILE }}-${{ hashFiles('.config', 'openwrt/feeds.conf.default') }}"
+          ls -la ~/.ccache || echo "ccache directory not found"
+
+      - name: Cache OpenWrt Downloads, Feeds, Toolchain, and ccache
+        if: github.event.inputs.force_clean != 'true'
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            openwrt/dl
+            openwrt/feeds
+            openwrt/staging_dir
+            openwrt/tmp
+            ~/.ccache
+          key: ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ env.TARGET }}-${{ env.PROFILE }}-${{ hashFiles('.config', 'openwrt/feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-${{ env.TARGET }}-
+            ${{ runner.os }}-openwrt-${{ env.OPENWRT_VERSION }}-
+            ${{ runner.os }}-openwrt-
+
+      - name: Log Cache Creation
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss detected. A new cache will be created after the build completes."
+
+      - name: Install Dependencies and ccache
+        run: |
+          sudo apt-get update -y || true
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            rsync unzip zlib1g-dev file wget subversion python3 python3-pip \
+            ccache --no-install-recommends || true
+          ccache --version || { echo "Error: ccache installation failed"; exit 1; }
+          ccache -M 5G  # Set ccache size to 5 GB
+
+      - name: Clone OpenWrt Source
+        run: |
+          git clone ${{ env.REPO_URL }} -b ${{ env.OPENWRT_VERSION }} openwrt
+          if [ -f .config ]; then
+            mv .config openwrt/.config
+          else
+            echo "Error: .config file not found in repository root"
+            exit 1
+          fi
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure Build
+        run: |
+          cd openwrt
+          echo "CONFIG_TARGET_${{ env.TARGET }}=y" >> .config
+          echo "CONFIG_TARGET_PROFILE=${{ env.PROFILE }}" >> .config
+          echo "CONFIG_TARGET_OPTIMIZATION=\"-O2 -pipe\"" >> .config
+          echo "CONFIG_CCACHE=y" >> .config
+          make defconfig
+
+      - name: Download and Build with ccache
+        run: |
+          cd openwrt
+          export CCACHE_DIR="$HOME/.ccache"
+          export CCACHE_BASEDIR="$PWD"
+          export CCACHE_LOGFILE="$PWD/ccache.log"
+          export CC="ccache gcc"
+          export CXX="ccache g++"
+          make download -j$(nproc)
+          make -j$(nproc) V=s
+
+      - name: Verify Cache Creation
+        run: |
+          echo "Cache directory contents:"
+          ls -la ~/.ccache || echo "ccache directory empty"
+          ccache -s || echo "ccache stats unavailable"
+          du -sh openwrt/dl openwrt/feeds openwrt/staging_dir openwrt/tmp || echo "Cache paths not populated"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-cudy-wr3000-${{ env.OPENWRT_VERSION }}
+          path: openwrt/bin/targets/${{ env.TARGET }}/*/*.bin
+          retention-days: 7
