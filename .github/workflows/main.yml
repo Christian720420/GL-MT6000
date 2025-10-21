@@ -13,6 +13,8 @@ on:
     - cron: "38 1 * * *"
 
 env:
+  OPENWRT_REPO: https://github.com/openwrt/openwrt.git
+  OPENWRT_BRANCH: openwrt-24.10
   CONFIG_FILE: wr3000.config
   GH_TOKEN: ${{ github.token }}
 
@@ -29,62 +31,21 @@ jobs:
           sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
           sudo apt autoremove -y && sudo apt clean -y
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Update and install feeds
+      - name: Clone OpenWrt source
         run: |
+          git clone --depth=1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
+          cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          ./scripts/feeds install -a
 
-      - name: Setup configuration and custom files
+      - name: Copy custom configuration and files
         run: |
-          if [ -d "files" ]; then
-            sed -i 's|XXXXXX/XXXXXX|${{ github.repository }}|' ./files/usr/bin/upgrade_custom_openwrt 2>/dev/null || true
-            chmod 755 ./files/usr/bin/upgrade_custom_openwrt 2>/dev/null || true
-          fi
-          cp -v ${{ env.CONFIG_FILE }} .config
+          cd openwrt
+          cp -v ../${{ env.CONFIG_FILE }} .config
+          [ -d ../files ] && cp -r ../files ./ || true
           make defconfig
 
       - name: Build firmware
         run: |
-          make download -j$(nproc) || { echo "Retrying download..."; sleep 30; make download -j1 V=s; }
-          make -j$(nproc) || { echo "Retrying build..."; sleep 30; make -j1 V=s; }
-          mkdir -p firmware
-          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ./firmware/ \; ||:
-          mv .config firmware/full.config ||:
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: cudy-wr3000-firmware
-          path: firmware/*
-
-      - name: Create release
-        run: |
-          RELEASE_DATE=$(date +%F)
-          gh release delete "wr3000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
-          gh release create "wr3000-${RELEASE_DATE}" --repo "${{ github.repository }}" --latest --notes "### 🧩 Device Info
-          - **Brand:** Cudy
-          - **Model:** WR3000 (v1, v2)
-          - **CPU:** MediaTek MT7981BA @1300 MHz (2 cores)
-          - **Flash:** 16 MB
-          - **RAM:** 256 MB
-          - **Wi-Fi:** MT7981BA (2.4 GHz b/g/n/ax) + MT7976CN (5 GHz a/n/ac/ax)
-          - **Ethernet:** 4× 1 Gbit LAN ports
-          - **Release:** OpenWrt 24.10.2
-          - **OEM Page:** [cudy.com](https://www.cudy.com)
-          - **Forum:** [OpenWrt Cudy WR3000](https://forum.openwrt.org/search?q=WR3000)
-
-          ### ⚙️ Build Configuration
-          - **Config:** [${{ env.CONFIG_FILE }}](${{ env.CONFIG_FILE }})
-          - **Features:** WiFi UCODE, Wireguard VPN, PBR, Adblock Fast
-          - **Removed:** odhcp, upnp, iptables, avahi, samba, usb storage" \
-          --title "OpenWrt Custom Release for Cudy WR3000 (${RELEASE_DATE})" firmware/*
-
-      - name: Clean up old releases
-        run: |
-          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read id tag; do
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
-          done
+          cd openwrt
+          make
