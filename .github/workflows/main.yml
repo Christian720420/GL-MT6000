@@ -15,7 +15,7 @@ on:
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: .config
+  CONFIG_FILE: wr3000.config
   GH_TOKEN: ${{ github.token }}
 
 jobs:
