@@ -1,4 +1,4 @@
-name: Build OpenWrt for GL-MT6000
+name: Build OpenWrt for GL-MT6000 (Self-Hosted)
 
 permissions:
   contents: write
@@ -10,30 +10,34 @@ on:
     branches:
       - main
   schedule:
-    - cron: "38 1 * * *"
+    - cron: "38 1 * * *" # build daily at 01:38 UTC
 
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  GH_TOKEN: ${{ github.token }}
   CONFIG_FILE: wr3000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_COMPRESS: 1
+  CCACHE_COMPILERCHECK: content
+  CC: "ccache gcc"
+  CXX: "ccache g++"
 
 jobs:
   build:
-    name: Build OpenWrt (GL-MT6000) with ccache
-    runs-on: ubuntu-24.04-arm
+    name: Build OpenWrt (GL-MT6000) on Self Runner
+    runs-on: self-hosted
 
     steps:
-      # Checkout your GL-MT6000 repo
+      # Checkout your GL-MT6000 repo (the repo that holds .config)
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
 
-      # Install minimal essential dependencies + ccache
-      - name: Install essential build tools
+      # Install required dependencies (runs locally once)
+      - name: Install dependencies
         run: |
           sudo apt update
           sudo apt install -y \
@@ -42,87 +46,71 @@ jobs:
             autoconf automake pkg-config git curl wget \
             ccache
 
-      # Cache ccache between workflow runs
+      # Cache ccache data to speed up rebuilds
       - name: Cache ccache
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-${{ hashFiles('source_repo/**') }}
+          key: selfrunner-ccache-${{ hashFiles('source_repo/*.config') }}
           restore-keys: |
-            ${{ runner.os }}-ccache-
+            selfrunner-ccache-
 
-      # Set ccache environment variables
-      - name: Configure ccache
+      # Print current ccache stats
+      - name: Show ccache status
         run: |
-          export CCACHE_DIR=${{ env.CCACHE_DIR }}
-          export CC="ccache gcc"
-          export CXX="ccache g++"
-          ccache -s
+          ccache -s || true
 
       # Clone OpenWrt source
-      - name: Clone OpenWrt source
+      - name: Clone OpenWrt
         run: |
           git clone --depth=1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # Copy configuration file and optional custom files
-      - name: Copy config and custom files
+      # Copy .config and optional files/
+      - name: Prepare OpenWrt build
         run: |
           cd openwrt
-          export TERM=dumb
-
-          # Copy .config
           if [ -f "../source_repo/${{ env.CONFIG_FILE }}" ]; then
             cp "../source_repo/${{ env.CONFIG_FILE }}" .config
           else
-            echo "Config file missing!"
+            echo "❌ Config file missing!"
             exit 1
           fi
 
-          # Copy optional files/
           if [ -d "../source_repo/files" ]; then
             cp -r ../source_repo/files ./
           fi
 
-          # Run defconfig in non-interactive mode
-          make defconfig || TERM=dumb make defconfig
+          make defconfig
 
-      # Build firmware with ccache
+      # Build firmware
       - name: Build firmware
         run: |
           cd openwrt
           make download -j1 || { sleep 10; make download -j1 V=s; }
-          make -j1 V=s || { sleep 10; make -j1 V=s; }
 
-          # Collect firmware and artifacts
+          # Try parallel build, fallback to 1 core if error
+          make -j$(nproc) V=s || { sleep 10; make -j1 V=s; }
+
           mkdir -p ../firmware
           find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
           mv .config ../firmware/full.config ||:
 
-      # Upload firmware artifacts
+      # Upload firmware as artifact
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
           path: firmware/*
 
-      # Create GitHub release
+      # Create a GitHub release
       - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_DATE=$(date +%F)
-          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
-          gh release create "gl-mt6000-${RELEASE_DATE}" \
-            --repo "${{ github.repository }}" \
-            --latest \
-            --title "OpenWrt Custom Build for GL-MT6000 (${RELEASE_DATE})" \
-            --notes "Custom OpenWrt firmware built for **GL-MT6000** using config \`${{ env.CONFIG_FILE }}\` from branch **${{ env.OPENWRT_BRANCH }}**." \
-            firmware/*
-
-      # Clean old releases
-      - name: Clean up old releases
-        run: |
-          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read id tag; do
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
-          done
+          set +e
+          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" >/dev/null 2>&1
+          set -e
