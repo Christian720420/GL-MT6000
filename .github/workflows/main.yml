@@ -17,28 +17,47 @@ env:
   OPENWRT_BRANCH: openwrt-24.10
   GH_TOKEN: ${{ github.token }}
   CONFIG_FILE: wr3000.config
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
   build:
-    name: Build OpenWrt (GL-MT6000)
+    name: Build OpenWrt (GL-MT6000) with ccache
     runs-on: ubuntu-24.04-arm
 
     steps:
-      # Checkout your custom GL-MT6000 repo
+      # Checkout your GL-MT6000 repo
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
 
-      # Install minimal essential dependencies
+      # Install minimal essential dependencies + ccache
       - name: Install essential build tools
         run: |
           sudo apt update
           sudo apt install -y \
             build-essential libncurses-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool \
-            autoconf automake pkg-config git curl wget
+            autoconf automake pkg-config git curl wget \
+            ccache
+
+      # Cache ccache between workflow runs
+      - name: Cache ccache
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-ccache-${{ hashFiles('source_repo/**') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      # Set ccache environment variables
+      - name: Configure ccache
+        run: |
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          export CC="ccache gcc"
+          export CXX="ccache g++"
+          ccache -s
 
       # Clone OpenWrt source
       - name: Clone OpenWrt source
@@ -56,45 +75,40 @@ jobs:
 
           # Copy .config
           if [ -f "../source_repo/${{ env.CONFIG_FILE }}" ]; then
-            echo "✅ Found config file"
             cp "../source_repo/${{ env.CONFIG_FILE }}" .config
           else
-            echo "❌ Config file missing!"
+            echo "Config file missing!"
             exit 1
           fi
 
-          # Copy custom files/ folder if it exists
+          # Copy optional files/
           if [ -d "../source_repo/files" ]; then
-            echo "✅ Found custom files folder"
             cp -r ../source_repo/files ./
-          else
-            echo "ℹ️ No custom files folder found"
           fi
 
           # Run defconfig in non-interactive mode
           make defconfig || TERM=dumb make defconfig
 
-      # Build the firmware
+      # Build firmware with ccache
       - name: Build firmware
         run: |
           cd openwrt
-          # Use single-threaded build for CI stability
-          make download -j1 || { echo "Retry download..."; sleep 10; make download -j1 V=s; }
-          make -j1 V=s || { echo "Retry build..."; sleep 10; make -j1 V=s; }
+          make download -j1 || { sleep 10; make download -j1 V=s; }
+          make -j1 V=s || { sleep 10; make -j1 V=s; }
 
-          # Collect firmware and build artifacts
+          # Collect firmware and artifacts
           mkdir -p ../firmware
           find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
           mv .config ../firmware/full.config ||:
 
-      # Upload artifacts for download
+      # Upload firmware artifacts
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
           path: firmware/*
 
-      # Create GitHub release with firmware
+      # Create GitHub release
       - name: Create release
         run: |
           RELEASE_DATE=$(date +%F)
@@ -106,7 +120,7 @@ jobs:
             --notes "Custom OpenWrt firmware built for **GL-MT6000** using config \`${{ env.CONFIG_FILE }}\` from branch **${{ env.OPENWRT_BRANCH }}**." \
             firmware/*
 
-      # Optional: clean old releases
+      # Clean old releases
       - name: Clean up old releases
         run: |
           gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read id tag; do
