@@ -299,44 +299,6 @@ jobs:
           path: firmware/*
           retention-days: 30
 
-      - name: Create GitHub Release
-        if: github.event_name == 'push' || github.event_name == 'schedule'
-        run: |
-          echo "=== Creating GitHub Release ==="
-          
-          # Get commit info
-          COMMIT_SHA=${{ github.sha }}
-          COMMIT_MESSAGE=$(git log -1 --pretty=%B $COMMIT_SHA)
-          BRANCH=${{ github.ref_name }}
-          
-          # Create release tag
-          RELEASE_TAG="v$(date +%Y%m%d)-${GITHUB_RUN_NUMBER}"
-          
-          # Create release
-          gh release create "$RELEASE_TAG" \
-            --notes "OpenWrt Custom Build for Cudy WR3000
-          
-**Build Information:**
-- Target: Cudy WR3000 v1 (mediatek/filogic)
-- Architecture: ARMv8
-- OpenWrt Version: 24.10
-- Kernel: 6.6.x
-- Build Date: $(date)
-- Commit: $COMMIT_SHA
-- Branch: $BRANCH
-- Runner: Self-hosted
-
-**Features:**
-- WiFi: MT7915E with advanced features (WED, ATF, TWT)
-- VPN: WireGuard support
-- Web Interface: LuCI
-- Custom configuration: wr3000.config" \
-            --title "Cudy WR3000 Firmware Build $RELEASE_TAG" \
-            firmware/*
-          
-          echo "✅ Release created: $RELEASE_TAG"
-
-      - name: Cleanup
         if: always()
         run: |
           echo "=== Cleanup ==="
