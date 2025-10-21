@@ -28,7 +28,7 @@ env:
 
 jobs:
   build:
-    runs-on: self-hosted:ubuntu-latest
+    runs-on: self-hosted 
     steps:
       - name: Verify Runner Environment
         run: |
