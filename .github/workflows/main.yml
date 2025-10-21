@@ -1,4 +1,4 @@
-name: Build OpenWrt Firmware
+name: Build OpenWrt for GL-MT6000
 
 permissions:
   contents: write
@@ -19,7 +19,7 @@ env:
 
 jobs:
   build:
-    name: Build OpenWrt (Custom)
+    name: Build OpenWrt (GL-MT6000)
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -29,13 +29,6 @@ jobs:
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: Copy custom configuration and files
-        run: |
-          cd openwrt
-          cp -v ../${{ env.CONFIG_FILE }} .config
-          [ -d ../files ] && cp -r ../files ./ || true
-          make defconfig
 
       - name: Build firmware
         run: |
@@ -49,18 +42,18 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-firmware
+          name: gl-mt6000-firmware
           path: firmware/*
 
       - name: Create release
         run: |
           RELEASE_DATE=$(date +%F)
-          gh release delete "openwrt-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
-          gh release create "openwrt-${RELEASE_DATE}" \
+          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
+          gh release create "gl-mt6000-${RELEASE_DATE}" \
             --repo "${{ github.repository }}" \
             --latest \
-            --title "OpenWrt Custom Build (${RELEASE_DATE})" \
-            --notes "Custom OpenWrt firmware built from branch **${{ env.OPENWRT_BRANCH }}** with config \`${{ env.CONFIG_FILE }}\`." \
+            --title "OpenWrt Custom Build for GL-MT6000 (${RELEASE_DATE})" \
+            --notes "Custom OpenWrt firmware built for **GL-MT6000** using config \`${{ env.CONFIG_FILE }}\` from branch **${{ env.OPENWRT_BRANCH }}**." \
             firmware/*
 
       - name: Clean up old releases
