@@ -1,4 +1,4 @@
-name: Build OpenWrt for Cudy Wr3000v1 (Self-Hosted)
+name: Build OpenWrt for GL-MT6000 (Self-Hosted)
 
 permissions:
   contents: write
@@ -13,8 +13,8 @@ on:
     - cron: "38 1 * * *" # build daily at 01:38 UTC
 
 env:
-  OPENWRT_REPO: https://github.com/Christian720420/GL-MT6000.git
-  OPENWRT_BRANCH: main
+  OPENWRT_REPO: https://github.com/openwrt/openwrt.git
+  OPENWRT_BRANCH: openwrt-24.10
   CONFIG_FILE: wr3000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}
@@ -25,7 +25,7 @@ env:
 
 jobs:
   build:
-    name: Build OpenWrt (WR3000v1) on Self Runner
+    name: Build OpenWrt (GL-MT6000) on Self Runner
     runs-on: self-hosted
 
     steps:
