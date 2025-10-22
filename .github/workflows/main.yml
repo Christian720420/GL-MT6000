@@ -162,4 +162,3 @@ jobs:
           echo "- Branch: \`${{ env.OPENWRT_BRANCH }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Config: \`${{ env.CONFIG_FILE }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Release: [View Release](https://github.com/${{ github.repository }}/releases/latest)" >> $GITHUB_STEP_SUMMARY
-```
