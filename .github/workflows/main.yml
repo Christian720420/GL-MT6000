@@ -1,4 +1,5 @@
-name: Build OpenWrt for GL-MT6000 (Self-Hosted)
+```yaml
+name: Build OpenWrt for Cudy Wr3000v1 (Self-Hosted)
 
 permissions:
   contents: write
@@ -13,7 +14,7 @@ on:
     - cron: "38 1 * * *" # build daily at 01:38 UTC
 
 env:
-  OPENWRT_REPO: https://github.com/pesa1234/openwrt.git
+  OPENWRT_REPO: https://github.com/Christian720420/GL-MT6000.git
   OPENWRT_BRANCH: main
   CONFIG_FILE: wr3000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -25,7 +26,7 @@ env:
 
 jobs:
   build:
-    name: Build OpenWrt (GL-MT6000) on Self Runner
+    name: Build OpenWrt (WR3000v1) on Self Runner
     runs-on: self-hosted
 
     steps:
@@ -147,4 +148,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | \
-          while read -r id
+          while read -r id tag; do
+            if [ -n "$id" ]; then
+              echo "🧹 Deleting old release $tag"
+              gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
+            fi
+          done
+
+      # 📄 Build summary
+      - name: Summary
+        run: |
+          echo "### ✅ Build Complete for GL-MT6000" >> $GITHUB_STEP_SUMMARY
+          echo "- Branch: \`${{ env.OPENWRT_BRANCH }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Config: \`${{ env.CONFIG_FILE }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Release: [View Release](https://github.com/${{ github.repository }}/releases/latest)" >> $GITHUB_STEP_SUMMARY
+```
