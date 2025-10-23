@@ -1,4 +1,4 @@
-name: Build OpenWrt Cudy WR3000 (Small Image)
+name: Build OpenWrt Cudy WR3000
 
 permissions:
   contents: write
@@ -14,7 +14,7 @@ on:
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: wr3000.config
+  CONFIG_FILE: wr3000.conf
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_COMPRESS: "1"
   CCACHE_COMPILERCHECK: content
@@ -23,9 +23,8 @@ jobs:
   build:
     runs-on: self-hosted
     steps:
-
       # -------------------------------------------------
-      # 0. Clean only diagnostic logs (safe)
+      # 0. Clean only diagnostic logs
       # -------------------------------------------------
       - name: Clean runner diagnostics
         run: |
@@ -35,18 +34,18 @@ jobs:
           find "$DIAG_ROOT" -type f -name "*.log" -delete 2>/dev/null || true
 
       # -------------------------------------------------
-      # 1. Checkout config repo (cjom/GL-MT6000 – contains WR3000 config)
+      # 1. Checkout this repository (your fork)
       # -------------------------------------------------
       - name: Checkout WR3000 config
         uses: actions/checkout@v4
         with:
-          repository: cjom/GL-MT6000
+          repository: Christian720420/GL-MT6000
           path: source_repo
           token: ${{ github.token }}
           persist-credentials: true
 
       # -------------------------------------------------
-      # 2. Install build dependencies (original sudo options)
+      # 2. Install build dependencies
       # -------------------------------------------------
       - name: Install dependencies
         run: |
@@ -58,7 +57,7 @@ jobs:
             ccache rsync gawk unzip time quilt
 
       # -------------------------------------------------
-      # 3. ccache cache (deterministic)
+      # 3. Restore ccache
       # -------------------------------------------------
       - name: Cache ccache
         id: cache
@@ -70,7 +69,6 @@ jobs:
             ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
             ${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
             ccache-${{ runner.os }}-${{ runner.arch }}-
             ccache-
 
@@ -78,7 +76,7 @@ jobs:
         run: ccache -s
 
       # -------------------------------------------------
-      # 4. Clone OpenWrt + feeds
+      # 4. Clone OpenWrt & update feeds
       # -------------------------------------------------
       - name: Clone OpenWrt & update feeds
         run: |
@@ -86,75 +84,18 @@ jobs:
           git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
           cd openwrt
 
-          # copy custom feeds file
           cp ../source_repo/feeds.conf.default ./feeds.conf.default
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       # -------------------------------------------------
-      # 5. Apply minimal-size .config
+      # 5. Apply .config (WR3000 config)
       # -------------------------------------------------
-      - name: Prepare .config (small image)
+      - name: Prepare .config
         run: |
           cd openwrt
           cp ../source_repo/${{ env.CONFIG_FILE }} .config
-
-          # ---- SIZE-OPTIMISATION TWEAKS ----
-          cat <<'EOF' >> .config
-
-          # Target – Cudy WR3000 v1/v2 (correct upstream profile)
-          CONFIG_TARGET_mediatek=y
-          CONFIG_TARGET_mediatek_filogic=y
-          CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_wr3000-v1=y
-
-          # Filesystem
-          CONFIG_SQUASHFS_XZ=y
-          CONFIG_SQUASHFS_BLOCK_SIZE=256
-          CONFIG_SQUASHFS_ZSTD=n
-
-          # Kernel
-          CONFIG_KERNEL_LZ4_COMPRESS=y
-          CONFIG_KERNEL_STRIP_DEBUG=y
-
-          # Packages – keep only essentials
-          CONFIG_PACKAGE_kmod-mt7915e=y
-          CONFIG_PACKAGE_kmod-mt7981-firmware=y
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-base=y
-          CONFIG_PACKAGE_luci-mod-admin=n
-          CONFIG_PACKAGE_luci-ssl=n
-          CONFIG_PACKAGE_luci-app-firewall=y
-          CONFIG_PACKAGE_luci-app-opkg=y
-          CONFIG_PACKAGE_luci-proto-ipv6=n
-          CONFIG_PACKAGE_luci-proto-ppp=y
-          CONFIG_PACKAGE_uhttpd=y
-          CONFIG_PACKAGE_uhttpd-mod-ubus=y
-          CONFIG_PACKAGE_dnsmasq=y
-          CONFIG_PACKAGE_iptables=y
-          CONFIG_PACKAGE_ip6tables=n
-          CONFIG_PACKAGE_kmod-nf-conntrack=y
-          CONFIG_PACKAGE_kmod-nf-nat=y
-          CONFIG_PACKAGE_kmod-ipt-conntrack=y
-          CONFIG_PACKAGE_kmod-ipt-nat=y
-          CONFIG_PACKAGE_dropbear=y
-          CONFIG_PACKAGE_wpad-basic=y
-          CONFIG_PACKAGE_hostapd-common=y
-
-          # Remove bloat
-          CONFIG_PACKAGE_python3=n
-          CONFIG_PACKAGE_php8=n
-          CONFIG_PACKAGE_lua=n
-          CONFIG_PACKAGE_luci-app-ttyd=n
-          CONFIG_PACKAGE_luci-app-statistics=n
-          CONFIG_PACKAGE_luci-app-sqm=n
-          CONFIG_PACKAGE_luci-app-travelmate=n
-          CONFIG_PACKAGE_luci-app-vpn*=n
-          CONFIG_PACKAGE_*doc*=n
-          CONFIG_PACKAGE_*example*=n
-          CONFIG_PACKAGE_*test*=n
-          EOF
-
           make defconfig
 
       # -------------------------------------------------
@@ -166,7 +107,7 @@ jobs:
           make download -j$(nproc) V=s || make download -j1 V=s
 
       # -------------------------------------------------
-      # 7. Build (parallel + fallback)
+      # 7. Build firmware
       # -------------------------------------------------
       - name: Build firmware
         run: |
@@ -179,7 +120,7 @@ jobs:
           mv .config ../firmware/full.config
 
       # -------------------------------------------------
-      # 8. Strip binaries (extra size reduction)
+      # 8. Strip binaries (optional)
       # -------------------------------------------------
       - name: Strip binaries
         run: |
@@ -206,7 +147,7 @@ jobs:
           gh release delete "wr3000-$DATE" --cleanup-tag -y 2>/dev/null || true
           gh release create "wr3000-$DATE" \
             --title "Cudy WR3000 OpenWrt ($DATE)" \
-            --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\` | Size-optimised" \
+            --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\`" \
             firmware/*
 
       # -------------------------------------------------
@@ -220,7 +161,7 @@ jobs:
           IMAGE_SIZE=$(du -h firmware/*sysupgrade*.bin | cut -f1)
 
           cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### Build Complete – Small Image (Cudy WR3000)
+          ### ✅ Build Complete – Cudy WR3000
           - **Runner**: \`self-hosted\`
           - **Cache**: \`$CACHE_STATUS\`
           - **Branch**: \`${{ env.OPENWRT_BRANCH }}\`
