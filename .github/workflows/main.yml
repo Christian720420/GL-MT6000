@@ -15,7 +15,7 @@ on:
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: wr3000.config
+  CONFIG_FILE: mt6000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}
   CCACHE_COMPRESS: 1
@@ -28,9 +28,7 @@ jobs:
     runs-on: self-hosted, scale-group
     steps:
       - uses: actions/checkout@v4
-    
 
-    steps:
       # 📦 Checkout your GL-MT6000 repo
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
