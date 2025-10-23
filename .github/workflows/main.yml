@@ -25,38 +25,19 @@ jobs:
     steps:
 
       # -------------------------------------------------
-      # 0. CLEAN DIAGNOSTICS (Refactored for syntax safety)
+      # 0. CLEAN ONLY DIAGNOSTIC LOGS (SAFE)
       # -------------------------------------------------
-      - name: Clean runner diagnostics
+      - name: Clean runner diagnostics only
         run: |
-          RUNNER_TEMP="${{ runner.temp }}"
-          DIAG_PAGES="${RUNNER_TEMP}/_diag/pages"
-          echo "Cleaning diagnostic pages: ${DIAG_PAGES}"
-          if [ -d "${DIAG_PAGES}" ]; then
-            rm -rf "${DIAG_PAGES}"/* || true
+          # DO NOT TOUCH _work/_temp/ — only clean _diag
+          DIAG_ROOT="/home/runner/actions-runner/_diag"
+          echo "Cleaning diagnostic logs in: $DIAG_ROOT"
+
+          if [ -d "$DIAG_ROOT/pages" ]; then
+            echo "Removing diagnostic pages..."
+            rm -rf "$DIAG_ROOT/pages"/* 2>/dev/null || true
           fi
 
-          DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"
-          echo "Cleaning diagnostic root: ${DIAG_ROOT}"
-          if [ -d "${DIAG_ROOT}" ]; then
-            find "${DIAG_ROOT}" -type f -name "*.log" -delete || true
-          fi
-
-      # -------------------------------------------------
-      # 1. Checkout GL-MT6000 (Private Repo)
-      # -------------------------------------------------
-      - name: Checkout GL-MT6000 config
-        uses: actions/checkout@v4
-        with:
-          repository: Christian720420/GL-MT6000
-          path: source_repo
-          token: ${{ github.token }}
-          persist-credentials: true
-
-      # -------------------------------------------------
-      # 2. Install dependencies
-      # -------------------------------------------------
-      - name: Install dependencies
-        run: |
-          sudo -n apt update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt install -y
+          if [ -d "$DIAG_ROOT" ]; then
+            echo "Removing .log files in _diag..."
+            find "$DI
