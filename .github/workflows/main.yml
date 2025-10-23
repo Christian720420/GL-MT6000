@@ -1,4 +1,4 @@
-name: Build OpenWrt GL-MT6000 (Small Image)
+name: Build OpenWrt Cudy WR3000 (Small Image)
 
 permissions:
   contents: write
@@ -35,9 +35,9 @@ jobs:
           find "$DIAG_ROOT" -type f -name "*.log" -delete 2>/dev/null || true
 
       # -------------------------------------------------
-      # 1. Checkout config repo (updated to cjom/GL-MT6000)
+      # 1. Checkout config repo (cjom/GL-MT6000 – contains WR3000 config)
       # -------------------------------------------------
-      - name: Checkout GL-MT6000 config
+      - name: Checkout WR3000 config
         uses: actions/checkout@v4
         with:
           repository: cjom/GL-MT6000
@@ -46,12 +46,12 @@ jobs:
           persist-credentials: true
 
       # -------------------------------------------------
-      # 2. Install build dependencies (non-interactive)
+      # 2. Install build dependencies (original sudo options)
       # -------------------------------------------------
       - name: Install dependencies
         run: |
-          sudo -n apt update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+          echo "2323" | sudo -S apt update -qq
+          echo "2323" | sudo -S DEBIAN_FRONTEND=noninteractive apt install -y \
             build-essential libncurses5-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool-bin \
             autoconf automake pkg-config git curl wget \
@@ -103,10 +103,10 @@ jobs:
           # ---- SIZE-OPTIMISATION TWEAKS ----
           cat <<'EOF' >> .config
 
-          # Target
-          CONFIG_TARGET_ramips=y
-          CONFIG_TARGET_ramips_mt7986=y
-          CONFIG_TARGET_ramips_mt7986_DEVICE_gl-mt6000=y
+          # Target – Cudy WR3000 v1/v2 (correct upstream profile)
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_filogic=y
+          CONFIG_TARGET_mediatek_filogic_DEVICE_cudy_wr3000-v1=y
 
           # Filesystem
           CONFIG_SQUASHFS_XZ=y
@@ -119,7 +119,7 @@ jobs:
 
           # Packages – keep only essentials
           CONFIG_PACKAGE_kmod-mt7915e=y
-          CONFIG_PACKAGE_kmod-mt7986-firmware=y
+          CONFIG_PACKAGE_kmod-mt7981-firmware=y
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-mod-admin=n
@@ -192,7 +192,7 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
-          name: gl-mt6000-firmware
+          name: cudy-wr3000-firmware
           path: firmware/*
 
       # -------------------------------------------------
@@ -203,9 +203,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           DATE=$(date +%F)
-          gh release delete "gl-mt6000-$DATE" --cleanup-tag -y 2>/dev/null || true
-          gh release create "gl-mt6000-$DATE" \
-            --title "GL-MT6000 OpenWrt ($DATE)" \
+          gh release delete "wr3000-$DATE" --cleanup-tag -y 2>/dev/null || true
+          gh release create "wr3000-$DATE" \
+            --title "Cudy WR3000 OpenWrt ($DATE)" \
             --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\` | Size-optimised" \
             firmware/*
 
@@ -220,7 +220,7 @@ jobs:
           IMAGE_SIZE=$(du -h firmware/*sysupgrade*.bin | cut -f1)
 
           cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### Build Complete – Small Image
+          ### Build Complete – Small Image (Cudy WR3000)
           - **Runner**: \`self-hosted\`
           - **Cache**: \`$CACHE_STATUS\`
           - **Branch**: \`${{ env.OPENWRT_BRANCH }}\`
