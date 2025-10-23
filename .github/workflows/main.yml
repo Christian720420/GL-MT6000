@@ -39,12 +39,15 @@ jobs:
       # 🛠️ Install build dependencies
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential libncurses-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool \
-            autoconf automake pkg-config git curl wget \
-            ccache
+          - name: Install dependencies
+  run: |
+    sudo apt update
+    sudo apt install -y \
+      build-essential libncurses-dev libssl-dev \
+      python3-setuptools zlib1g-dev libtool \
+      autoconf automake pkg-config git curl wget \
+      ccache rsync gawk unzip
+
 
       # ⚡ Cache ccache for faster rebuilds
       - name: Cache ccache
