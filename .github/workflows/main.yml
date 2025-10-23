@@ -1,4 +1,4 @@
-name: Build OpenWrt for GL-MT6000 (Self-Hosted Runner)
+name: Build OpenWrt for GL-MT6000 (Self-Hosted)
 
 permissions:
   contents: write
@@ -14,49 +14,46 @@ on:
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: mt6000.config
+  CONFIG_FILE: wr3000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_COMPRESS: "1"
   CCACHE_COMPILERCHECK: content
 
 jobs:
   build:
-    runs-on: self-hosted   # Or [self-hosted, debian] if labeled
+    runs-on: self-hosted
     steps:
 
       # -------------------------------------------------
-      # 0. CLEAN DIAGNOSTICS & WORKSPACE
+      # 0. CLEAN DIAGNOSTICS (Fixes "file already exists")
       # -------------------------------------------------
-      - name: Clean runner diagnostics and workspace
+      - name: Clean runner diagnostics
         run: |
           RUNNER_TEMP="${{ runner.temp }}"
           DIAG_PAGES="$RUNNER_TEMP/_diag/pages"
-          echo "Cleaning diagnostic pages: $DIAG_PAGES"
+          echo "Cleaning: $DIAG_PAGES"
           [ -d "$DIAG_PAGES" ] && rm -rf "$DIAG_PAGES"/* || true
 
           DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"
           [ -d "$DIAG_ROOT" ] && find "$DIAG_ROOT" -type f -name "*.log" -delete || true
 
-          echo "Cleaning workspace: ${{ github.workspace }}"
-          rm -rf "${{ github.workspace }}"/* || true
-
       # -------------------------------------------------
-      # 1. Checkout GL-MT6000 config (FIXED: with token for private repo)
+      # 1. Checkout GL-MT6000 (Private Repo)
       # -------------------------------------------------
       - name: Checkout GL-MT6000 config
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
-          token: ${{ github.token }}   # Provides auth for private repos
-          persist-credentials: true    # Enables credential helper for HTTPS
+          token: ${{ github.token }}
+          persist-credentials: true
 
       # -------------------------------------------------
-      # 2. Install dependencies
+      # 2. Install dependencies (no password prompt)
       # -------------------------------------------------
       - name: Install dependencies
         run: |
-          echo "2323" | sudo -S apt update -qq
+          sudo -n apt update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
             build-essential libncurses5-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool-bin \
@@ -64,88 +61,13 @@ jobs:
             ccache rsync gawk unzip time
 
       # -------------------------------------------------
-      # 3. Cache ccache
+      # 3. Cache ccache (Deterministic Key)
       # -------------------------------------------------
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: self-ccache-${{ runner.os }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
-          restore-keys: |
-            self-ccache-${{ runner.os }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            self-ccache-${{ runner.os }}-
-            self-ccache-
-
-      - name: ccache stats
-        run: ccache -s
-
-      # -------------------------------------------------
-      # 4. Clone OpenWrt
-      # -------------------------------------------------
-      - name: Clone OpenWrt
-        run: |
-          rm -rf openwrt
-          git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
-          cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      # -------------------------------------------------
-      # 5. Prepare build
-      # -------------------------------------------------
-      - name: Prepare build
-        run: |
-          cd openwrt
-          cp ../source_repo/${{ env.CONFIG_FILE }} .config
-          [ -d ../source_repo/files ] && cp -r ../source_repo/files ./files || true
-          make defconfig
-
-      # -------------------------------------------------
-      # 6. Build firmware
-      # -------------------------------------------------
-      - name: Build firmware
-        run: |
-          cd openwrt
-          make download -j1 V=s || make download -j1 V=s
-          make -j$(nproc) V=s || make -j1 V=s
-
-          mkdir -p ../firmware
-          find bin -type f \( -name '*sysupgrade*.bin' -o -name 'sha256sums' -o -name 'config.buildinfo' \) \
-            -exec mv -v {} ../firmware/ \;
-          mv .config ../firmware/full.config
-
-      # -------------------------------------------------
-      # 7. Upload artifacts
-      # -------------------------------------------------
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gl-mt6000-firmware
-          path: firmware/*
-
-      # -------------------------------------------------
-      # 8. Create release
-      # -------------------------------------------------
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          DATE=$(date +%F)
-          gh release delete "gl-mt6000-$DATE" --cleanup-tag -y 2>/dev/null || true
-          gh release create "gl-mt6000-$DATE" \
-            --title "GL-MT6000 OpenWrt Build ($DATE)" \
-            --notes "Built on self-hosted runner using \`${{ env.CONFIG_FILE }}\`" \
-            firmware/*
-
-      # -------------------------------------------------
-      # 9. Summary
-      # -------------------------------------------------
-      - name: Summary
-        run: |
-          cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### Build Complete on Self-Hosted Runner
-          - OS: \`${{ runner.os }}\`
-          - Branch: \`${{ env.OPENWRT_BRANCH }}\`
-          - Config: \`${{ env.CONFIG_FILE }}\`
-          - [View Latest Release](https://github.com/${{ github.repository }}/releases/latest)
-          EOF
+          key: >-
+            self-ccache-${{ runner.os }}-${{ runner.arch }}-
+            ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
+            ${{ hashFiles('
