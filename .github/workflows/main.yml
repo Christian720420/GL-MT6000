@@ -25,8 +25,10 @@ env:
 
 jobs:
   build:
-    name: Build OpenWrt (GL-MT6000) on Self Runner
-    runs-on: self-hosted
+    runs-on: [self-hosted, scale-group]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Running on self-hosted runner"
 
     steps:
       # 📦 Checkout your GL-MT6000 repo
