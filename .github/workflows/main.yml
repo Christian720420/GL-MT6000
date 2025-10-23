@@ -25,49 +25,11 @@ jobs:
     steps:
 
       # -------------------------------------------------
-      # 0. CLEAN DIAGNOSTICS (Fixes "file already exists")
+      # 0. CLEAN DIAGNOSTICS
       # -------------------------------------------------
       - name: Clean runner diagnostics
         run: |
           RUNNER_TEMP="${{ runner.temp }}"
           DIAG_PAGES="$RUNNER_TEMP/_diag/pages"
           echo "Cleaning: $DIAG_PAGES"
-          [ -d "$DIAG_PAGES" ] && rm -rf "$DIAG_PAGES"/* || true
-
-          DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"
-          [ -d "$DIAG_ROOT" ] && find "$DIAG_ROOT" -type f -name "*.log" -delete || true
-
-      # -------------------------------------------------
-      # 1. Checkout GL-MT6000 (Private Repo)
-      # -------------------------------------------------
-      - name: Checkout GL-MT6000 config
-        uses: actions/checkout@v4
-        with:
-          repository: Christian720420/GL-MT6000
-          path: source_repo
-          token: ${{ github.token }}
-          persist-credentials: true
-
-      # -------------------------------------------------
-      # 2. Install dependencies (no password prompt)
-      # -------------------------------------------------
-      - name: Install dependencies
-        run: |
-          sudo -n apt update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-            build-essential libncurses5-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool-bin \
-            autoconf automake pkg-config git curl wget \
-            ccache rsync gawk unzip time
-
-      # -------------------------------------------------
-      # 3. Cache ccache (Deterministic Key)
-      # -------------------------------------------------
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: >-
-            self-ccache-${{ runner.os }}-${{ runner.arch }}-
-            ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            ${{ hashFiles('
+          [ -
