@@ -1,4 +1,4 @@
-name: Build OpenWrt GL-MT6000 (Small Image)
+name: Build OpenWrt Cudy-Wr3000 (Small Image)
 
 permissions:
   contents: write
