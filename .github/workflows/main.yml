@@ -1,4 +1,4 @@
-name: Build OpenWrt for GL-MT6000 (Debian Runner)
+name: Build OpenWrt for GL-MT6000 (Self-Hosted Runner)
 
 permissions:
   contents: write
@@ -21,27 +21,29 @@ env:
 
 jobs:
   build:
-    runs-on: debian   # ← Matches your runner label
+    # Targets ANY self-hosted runner
+    # Add label to restrict: runs-on: [self-hosted, debian]
+    runs-on: self-hosted
     steps:
 
       # -------------------------------------------------
-      # 0. CLEAN DIAGNOSTICS & WORKSPACE
+      # 0. CLEAN DIAGNOSTICS & WORKSPACE (Fixes "file already exists")
       # -------------------------------------------------
       - name: Clean runner diagnostics and workspace
         run: |
           RUNNER_TEMP="${{ runner.temp }}"
           DIAG_PAGES="$RUNNER_TEMP/_diag/pages"
-          echo "Cleaning: $DIAG_PAGES"
+          echo "Cleaning diagnostic pages: $DIAG_PAGES"
           [ -d "$DIAG_PAGES" ] && rm -rf "$DIAG_PAGES"/* || true
 
           DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"
-          [ -d "$DIAG_ROOT" ] && find "$DIAG_ROOT" -name "*.log" -delete || true
+          [ -d "$DIAG_ROOT" ] && find "$DIAG_ROOT" -type f -name "*.log" -delete || true
 
           echo "Cleaning workspace: ${{ github.workspace }}"
           rm -rf "${{ github.workspace }}"/* || true
 
       # -------------------------------------------------
-      # 1. Checkout config repo
+      # 1. Checkout config repository
       # -------------------------------------------------
       - name: Checkout GL-MT6000 config
         uses: actions/checkout@v4
@@ -50,31 +52,52 @@ jobs:
           path: source_repo
 
       # -------------------------------------------------
-      # 2. Install Debian packages
+      # 2. Install system dependencies
       # -------------------------------------------------
       - name: Install dependencies
         run: |
-          echo "2323" | sudo APT_UPDATE=1 apt update -qq
-          echo "2323" | sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+          echo "2323" | sudo -S apt update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
             build-essential libncurses5-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool-bin \
             autoconf automake pkg-config git curl wget \
             ccache rsync gawk unzip time
 
       # -------------------------------------------------
-      # 3. Cache ccache
+      # 3. Cache ccache (deterministic + fallbacks)
       # -------------------------------------------------
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-debian-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
+          key: self-ccache-${{ runner.os }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
           restore-keys: |
-            ccache-debian-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            ccache-debian-
+            self-ccache-${{ runner.os }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
+            self-ccache-${{ runner.os }}-
+            self-ccache-
 
       - name: ccache stats
         run: ccache -s
 
       # -------------------------------------------------
-      # 4. Clone
+      # 4. Clone OpenWrt (always fresh)
+      # -------------------------------------------------
+      - name: Clone OpenWrt
+        run: |
+          rm -rf openwrt
+          git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # -------------------------------------------------
+      # 5. Prepare build config
+      # -------------------------------------------------
+      - name: Prepare build
+        run: |
+          cd openwrt
+          cp ../source_repo/${{ env.CONFIG_FILE }} .config
+          [ -d ../source_repo/files ] && cp -r ../source_repo/files ./files || true
+          make defconfig
+
+      # ------------------------------------------------
