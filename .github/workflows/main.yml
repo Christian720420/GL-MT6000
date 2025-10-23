@@ -7,10 +7,9 @@ permissions:
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [ main ]
   schedule:
-    - cron: "38 1 * * *" # build daily at 01:38 UTC
+    - cron: "38 1 * * *"   # daily at 01:38 UTC
 
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
@@ -18,145 +17,165 @@ env:
   CONFIG_FILE: mt6000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}
-  CCACHE_COMPRESS: 1
+  CCACHE_COMPRESS: "1"
   CCACHE_COMPILERCHECK: content
   CC: "ccache gcc"
   CXX: "ccache g++"
 
 jobs:
   build:
+    # If you have multiple self-hosted runners, add a unique label, e.g.:
+    # runs-on: [self-hosted, X64, Linux, runner-01]
     runs-on: [self-hosted, X64, Linux]
     steps:
-      # 🧾 Checkout your GL-MT6000 repository
+
+      # -------------------------------------------------
+      # 0. **FORCE CLEAN** – remove any leftover workspace & runner diag files
+      # -------------------------------------------------
+      - name: Clean workspace and runner diagnostics
+        run: |
+          # Workspace
+          rm -rf "${{ github.workspace }}"/* || true
+          # Runner diagnostic pages (prevents "file already exists" error)
+          DIAG_DIR="${{ runner.temp }}/_diag/pages"
+          [ -d "$DIAG_DIR" ] && rm -rf "$DIAG_DIR"/* || true
+
+      # -------------------------------------------------
+      # 1. Checkout GL-MT6000 repository (source of .config & files)
+      # -------------------------------------------------
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
 
-      # 🛠️ Install build dependencies
+      # -------------------------------------------------
+      # 2. Install system dependencies
+      # -------------------------------------------------
       - name: Install dependencies
         run: |
-          echo "2323" | sudo -S apt update
+          echo "2323" | sudo -S apt update -qq
           sudo apt install -y \
             build-essential libncurses-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool \
             autoconf automake pkg-config git curl wget \
             ccache rsync gawk unzip
 
-      # ⚡ Cache ccache for faster rebuilds
+      # -------------------------------------------------
+      # 3. Cache ccache – deterministic + tiered fallbacks
+      # -------------------------------------------------
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: selfrunner-ccache-${{ hashFiles('source_repo/*.config') }}
+          key: >-
+            selfrunner-ccache-${{ runner.os }}-${{ runner.arch }}-
+            ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
+            ${{ hashFiles('source_repo/feeds.conf*') || 'no-feeds' }}
           restore-keys: |
+            selfrunner-ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
+            selfrunner-ccache-${{ runner.os }}-${{ runner.arch }}-
             selfrunner-ccache-
 
-      # 🔍 Show ccache status
+      # -------------------------------------------------
+      # 4. Show ccache stats
+      # -------------------------------------------------
       - name: Show ccache status
-        run: |
-          ccache --show-stats || true
+        run: ccache --show-stats || true
 
-      # 🧬 Clone OpenWrt safely with retry logic
+      # -------------------------------------------------
+      # 5. Clone OpenWrt (always fresh)
+      # -------------------------------------------------
       - name: Clone OpenWrt
         run: |
-          if [ -d "openwrt/.git" ]; then
-            echo "⚠️ Existing OpenWrt directory found — removing..."
-            echo "2323" | sudo -S rm -rf openwrt
-          fi
-
-          echo "📥 Cloning OpenWrt repository..."
-          git clone -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
+          rm -rf openwrt
+          git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
           cd openwrt
 
-          # Configure Git reliability parameters
-          git config --global http.postBuffer 500M
+          git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
-          git config --global http.maxRequests 10
           git config --global core.compression 0
           git config --global url."https://github.com/".insteadOf git://github.com/
 
-          echo "🔄 Updating OpenWrt feeds with retry logic..."
           for i in {1..5}; do
             ./scripts/feeds update -a && ./scripts/feeds install -a && break
-            echo "⚠️ Feed update failed (attempt $i) — retrying in 20s..."
+            echo "Feed update failed (attempt $i) – retrying in 20s..."
             sleep 20
           done
 
-      # ⚙️ Prepare OpenWrt build environment
+      # -------------------------------------------------
+      # 6. Prepare build environment
+      # -------------------------------------------------
       - name: Prepare OpenWrt build
         run: |
           cd openwrt
-          if [ -f "../source_repo/${{ env.CONFIG_FILE }}" ]; then
-            cp "../source_repo/${{ env.CONFIG_FILE }}" .config
-          else
-            echo "❌ Config file missing!"
-            exit 1
-          fi
-
-          if [ -d "../source_repo/files" ]; then
-            cp -r ../source_repo/files ./files
-          fi
-
+          cp ../source_repo/${{ env.CONFIG_FILE }} .config
+          [ -d ../source_repo/files ] && cp -r ../source_repo/files ./files || true
           make defconfig
 
-      # 🏗️ Build firmware
+      # -------------------------------------------------
+      # 7. Build firmware
+      # -------------------------------------------------
       - name: Build firmware
         run: |
           cd openwrt
           make download -j1 || { sleep 10; make download -j1 V=s; }
-
-          echo "🚧 Starting OpenWrt build using $(nproc) threads..."
-          make -j$(nproc) V=s || { echo "⚠️ Parallel build failed, retrying with 1 job..."; make -j1 V=s; }
+          echo "Building with $(nproc) threads..."
+          make -j$(nproc) V=s || { echo "Parallel build failed – falling back to -j1"; make -j1 V=s; }
 
           mkdir -p ../firmware
-          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
-          mv .config ../firmware/full.config ||:
+          find bin -type f \
+            \( -iname '*sysupgrade*.bin' -o -iname 'sha256sums' -o -iname 'config.buildinfo' \) \
+            -exec mv -v {} ../firmware/ \;
+          mv .config ../firmware/full.config
 
-      # 📤 Upload firmware as build artifact
+      # -------------------------------------------------
+      # 8. Upload artifacts
+      # -------------------------------------------------
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
           path: firmware/*
 
-      # 🚀 Create GitHub release with firmware
+      # -------------------------------------------------
+      # 9. Create GitHub release
+      # -------------------------------------------------
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           RELEASE_DATE=$(date +%F)
-          set +e
-          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" >/dev/null 2>&1
-          set -e
-
+          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" 2>/dev/null || true
           gh release create "gl-mt6000-${RELEASE_DATE}" \
             --repo "${{ github.repository }}" \
-            --latest \
             --title "OpenWrt Custom Build for GL-MT6000 (${RELEASE_DATE})" \
-            --notes "Custom OpenWrt firmware built for **GL-MT6000** using \`${{ env.CONFIG_FILE }}\` from branch **${{ env.OPENWRT_BRANCH }}**." \
+            --notes "Built with \`${{ env.CONFIG_FILE }}\` from **${{ env.OPENWRT_BRANCH }}**." \
             firmware/*
 
-      # 🧽 Clean up old releases (keep 6 latest)
+      # -------------------------------------------------
+      # 10. Prune old releases (keep latest 6)
+      # -------------------------------------------------
       - name: Clean up old releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | \
-          while read -r id tag; do
-            if [ -n "$id" ]; then
-              echo "🧹 Deleting old release $tag"
-              gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
-              gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
-            fi
+          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read -r id tag; do
+            [ -n "$id" ] || continue
+            echo "Deleting old release $tag"
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
           done
 
-      # 📄 Build summary
+      # -------------------------------------------------
+      # 11. Summary
+      # -------------------------------------------------
       - name: Summary
         run: |
-          echo "### ✅ Build Complete for GL-MT6000" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: \`${{ env.OPENWRT_BRANCH }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Config: \`${{ env.CONFIG_FILE }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Release: [View Release](https://github.com/${{ github.repository }}/releases/latest)" >> $GITHUB_STEP_SUMMARY
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          ### ✅ Build Complete for GL-MT6000
+          - Branch: \`${{ env.OPENWRT_BRANCH }}\`
+          - Config: \`${{ env.CONFIG_FILE }}\`
+          - Release: [View Latest](https://github.com/${{ github.repository }}/releases/latest)
+          EOF
