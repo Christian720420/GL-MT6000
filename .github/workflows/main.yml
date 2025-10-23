@@ -21,13 +21,11 @@ env:
 
 jobs:
   build:
-    # Targets ANY self-hosted runner
-    # Add label to restrict: runs-on: [self-hosted, debian]
-    runs-on: self-hosted
+    runs-on: self-hosted   # Or [self-hosted, debian] if labeled
     steps:
 
       # -------------------------------------------------
-      # 0. CLEAN DIAGNOSTICS & WORKSPACE (Fixes "file already exists")
+      # 0. CLEAN DIAGNOSTICS & WORKSPACE
       # -------------------------------------------------
       - name: Clean runner diagnostics and workspace
         run: |
@@ -43,16 +41,18 @@ jobs:
           rm -rf "${{ github.workspace }}"/* || true
 
       # -------------------------------------------------
-      # 1. Checkout config repository
+      # 1. Checkout GL-MT6000 config (FIXED: with token for private repo)
       # -------------------------------------------------
       - name: Checkout GL-MT6000 config
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
+          token: ${{ github.token }}   # Provides auth for private repos
+          persist-credentials: true    # Enables credential helper for HTTPS
 
       # -------------------------------------------------
-      # 2. Install system dependencies
+      # 2. Install dependencies
       # -------------------------------------------------
       - name: Install dependencies
         run: |
@@ -64,7 +64,7 @@ jobs:
             ccache rsync gawk unzip time
 
       # -------------------------------------------------
-      # 3. Cache ccache (deterministic + fallbacks)
+      # 3. Cache ccache
       # -------------------------------------------------
       - name: Cache ccache
         uses: actions/cache@v4
@@ -80,7 +80,7 @@ jobs:
         run: ccache -s
 
       # -------------------------------------------------
-      # 4. Clone OpenWrt (always fresh)
+      # 4. Clone OpenWrt
       # -------------------------------------------------
       - name: Clone OpenWrt
         run: |
@@ -91,7 +91,7 @@ jobs:
           ./scripts/feeds install -a
 
       # -------------------------------------------------
-      # 5. Prepare build config
+      # 5. Prepare build
       # -------------------------------------------------
       - name: Prepare build
         run: |
@@ -100,4 +100,52 @@ jobs:
           [ -d ../source_repo/files ] && cp -r ../source_repo/files ./files || true
           make defconfig
 
-      # ------------------------------------------------
+      # -------------------------------------------------
+      # 6. Build firmware
+      # -------------------------------------------------
+      - name: Build firmware
+        run: |
+          cd openwrt
+          make download -j1 V=s || make download -j1 V=s
+          make -j$(nproc) V=s || make -j1 V=s
+
+          mkdir -p ../firmware
+          find bin -type f \( -name '*sysupgrade*.bin' -o -name 'sha256sums' -o -name 'config.buildinfo' \) \
+            -exec mv -v {} ../firmware/ \;
+          mv .config ../firmware/full.config
+
+      # -------------------------------------------------
+      # 7. Upload artifacts
+      # -------------------------------------------------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gl-mt6000-firmware
+          path: firmware/*
+
+      # -------------------------------------------------
+      # 8. Create release
+      # -------------------------------------------------
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date +%F)
+          gh release delete "gl-mt6000-$DATE" --cleanup-tag -y 2>/dev/null || true
+          gh release create "gl-mt6000-$DATE" \
+            --title "GL-MT6000 OpenWrt Build ($DATE)" \
+            --notes "Built on self-hosted runner using \`${{ env.CONFIG_FILE }}\`" \
+            firmware/*
+
+      # -------------------------------------------------
+      # 9. Summary
+      # -------------------------------------------------
+      - name: Summary
+        run: |
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          ### Build Complete on Self-Hosted Runner
+          - OS: \`${{ runner.os }}\`
+          - Branch: \`${{ env.OPENWRT_BRANCH }}\`
+          - Config: \`${{ env.CONFIG_FILE }}\`
+          - [View Latest Release](https://github.com/${{ github.repository }}/releases/latest)
+          EOF
