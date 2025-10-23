@@ -37,7 +37,7 @@ jobs:
       # 🛠️ Install build dependencies
       - name: Install dependencies
         run: |
-          sudo apt update
+          echo "2323" | sudo -S apt update
           sudo apt install -y \
             build-essential libncurses-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool \
