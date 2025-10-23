@@ -1,4 +1,4 @@
-name: Build OpenWrt for GL-MT6000 (Self-Hosted)
+name: Build OpenWrt GL-MT6000 (Small Image)
 
 permissions:
   contents: write
@@ -9,7 +9,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: "38 1 * * *"   # daily at 01:38 UTC
+    - cron: "38 1 * * *"   # daily 01:38 UTC
 
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
@@ -25,26 +25,17 @@ jobs:
     steps:
 
       # -------------------------------------------------
-      # 0. CLEAN ONLY DIAGNOSTIC LOGS (SAFE)
+      # 0. Clean runner diagnostics (safe)
       # -------------------------------------------------
-      - name: Clean runner diagnostics only
+      - name: Clean runner diagnostics
         run: |
-          # DO NOT TOUCH _work/_temp/ — only clean _diag
           DIAG_ROOT="/home/runner/actions-runner/_diag"
-          echo "Cleaning diagnostic logs in: $DIAG_ROOT"
-
-          if [ -d "$DIAG_ROOT/pages" ]; then
-            echo "Removing diagnostic pages..."
-            rm -rf "$DIAG_ROOT/pages"/* 2>/dev/null || true
-          fi
-
-          if [ -d "$DIAG_ROOT" ]; then
-            echo "Removing .log files in _diag..."
-            find "$DIAG_ROOT" -type f -name "*.log" -delete 2>/dev/null || true
-          fi
+          echo "Cleaning $DIAG_ROOT ..."
+          rm -rf "$DIAG_ROOT/pages"/* 2>/dev/null || true
+          find "$DIAG_ROOT" -type f -name "*.log" -delete 2>/dev/null || true
 
       # -------------------------------------------------
-      # 1. Checkout GL-MT6000 (Private Repo)
+      # 1. Checkout private config repo
       # -------------------------------------------------
       - name: Checkout GL-MT6000 config
         uses: actions/checkout@v4
@@ -55,7 +46,7 @@ jobs:
           persist-credentials: true
 
       # -------------------------------------------------
-      # 2. Install dependencies
+      # 2. Install build dependencies (non-interactive)
       # -------------------------------------------------
       - name: Install dependencies
         run: |
@@ -64,10 +55,10 @@ jobs:
             build-essential libncurses5-dev libssl-dev \
             python3-setuptools zlib1g-dev libtool-bin \
             autoconf automake pkg-config git curl wget \
-            ccache rsync gawk unzip time
+            ccache rsync gawk unzip time quilt
 
       # -------------------------------------------------
-      # 3. Cache ccache
+      # 3. ccache cache (deterministic)
       # -------------------------------------------------
       - name: Cache ccache
         id: cache
@@ -75,63 +66,137 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           key: >-
-            self-ccache-${{ runner.os }}-${{ runner.arch }}-
+            ccache-${{ runner.os }}-${{ runner.arch }}-
             ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
             ${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
           restore-keys: |
-            self-ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            self-ccache-${{ runner.os }}-${{ runner.arch }}-
-            self-ccache-
+            ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
+            ccache-${{ runner.os }}-${{ runner.arch }}-
+            ccache-
 
-      - name: ccache stats
+      - name: ccache stats (pre-build)
         run: ccache -s
 
       # -------------------------------------------------
-      # 4. Clone OpenWrt
+      # 4. Clone OpenWrt + feeds
       # -------------------------------------------------
-      - name: Clone OpenWrt
+      - name: Clone OpenWrt & update feeds
         run: |
           rm -rf openwrt
           git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
           cd openwrt
+
+          # copy custom feeds file
+          cp ../source_repo/feeds.conf.default ./feeds.conf.default
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       # -------------------------------------------------
-      # 5. Prepare build
+      # 5. Apply minimal-size .config
       # -------------------------------------------------
-      - name: Prepare build
+      - name: Prepare .config (small image)
         run: |
           cd openwrt
           cp ../source_repo/${{ env.CONFIG_FILE }} .config
-          [ -d ../source_repo/files ] && cp -r ../source_repo/files ./files || true
+
+          # ---- SIZE-OPTIMISATION TWEAKS ----
+          cat <<'EOF' >> .config
+
+          # Target
+          CONFIG_TARGET_ramips=y
+          CONFIG_TARGET_ramips_mt7986=y
+          CONFIG_TARGET_ramips_mt7986_DEVICE_gl-mt6000=y
+
+          # Filesystem
+          CONFIG_SQUASHFS_XZ=y
+          CONFIG_SQUASHFS_BLOCK_SIZE=256
+          CONFIG_SQUASHFS_ZSTD=n
+
+          # Kernel
+          CONFIG_KERNEL_LZ4_COMPRESS=y
+          CONFIG_KERNEL_STRIP_DEBUG=y
+
+          # Packages – keep only essentials
+          CONFIG_PACKAGE_kmod-mt7915e=y
+          CONFIG_PACKAGE_kmod-mt7986-firmware=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=n
+          CONFIG_PACKAGE_luci-ssl=n
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-opkg=y
+          CONFIG_PACKAGE_luci-proto-ipv6=n
+          CONFIG_PACKAGE_luci-proto-ppp=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_dnsmasq=y
+          CONFIG_PACKAGE_iptables=y
+          CONFIG_PACKAGE_ip6tables=n
+          CONFIG_PACKAGE_kmod-nf-conntrack=y
+          CONFIG_PACKAGE_kmod-nf-nat=y
+          CONFIG_PACKAGE_kmod-ipt-conntrack=y
+          CONFIG_PACKAGE_kmod-ipt-nat=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_wpad-basic=y
+          CONFIG_PACKAGE_hostapd-common=y
+
+          # Remove bloat
+          CONFIG_PACKAGE_python3=n
+          CONFIG_PACKAGE_php8=n
+          CONFIG_PACKAGE_lua=n
+          CONFIG_PACKAGE_luci-app-ttyd=n
+          CONFIG_PACKAGE_luci-app-statistics=n
+          CONFIG_PACKAGE_luci-app-sqm=n
+          CONFIG_PACKAGE_luci-app-travelmate=n
+          CONFIG_PACKAGE_luci-app-vpn*=n
+          CONFIG_PACKAGE_*doc*=n
+          CONFIG_PACKAGE_*example*=n
+          CONFIG_PACKAGE_*test*=n
+          EOF
+
           make defconfig
 
       # -------------------------------------------------
-      # 6. Build
+      # 6. Download sources
+      # -------------------------------------------------
+      - name: Download sources
+        run: |
+          cd openwrt
+          make download -j$(nproc) V=s || make download -j1 V=s
+
+      # -------------------------------------------------
+      # 7. Build (parallel + fallback)
       # -------------------------------------------------
       - name: Build firmware
         run: |
           cd openwrt
-          make download -j1 V=s
           make -j$(nproc) V=s || make -j1 V=s
 
           mkdir -p ../firmware
           find bin -type f \( -name '*sysupgrade*.bin' -o -name 'sha256sums' -o -name 'config.buildinfo' \) \
-            -exec mv {} ../firmware/ \;
+            -exec mv -v {} ../firmware/ \;
           mv .config ../firmware/full.config
 
       # -------------------------------------------------
-      # 7. Upload
+      # 8. Strip binaries (extra size reduction)
       # -------------------------------------------------
-      - name: Upload artifacts
+      - name: Strip binaries
+        run: |
+          find firmware -name '*sysupgrade*.bin' -exec \
+            sh -c 'strip --strip-unneeded "$1" 2>/dev/null || true' _ {} \;
+
+      # -------------------------------------------------
+      # 9. Upload artifacts
+      # -------------------------------------------------
+      - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: gl-mt6000-firmware
           path: firmware/*
 
       # -------------------------------------------------
-      # 8. Release
+      # 10. Create GitHub release
       # -------------------------------------------------
       - name: Create release
         env:
@@ -139,28 +204,27 @@ jobs:
         run: |
           DATE=$(date +%F)
           gh release delete "gl-mt6000-$DATE" --cleanup-tag -y 2>/dev/null || true
-          gh release create "gl-mt6000-$ ponieważ
-
-          DATE=$(date +%F)
-          gh release delete "gl-mt6000-$DATE" --cleanup-tag -y 2>/dev/null || true
           gh release create "gl-mt6000-$DATE" \
             --title "GL-MT6000 OpenWrt ($DATE)" \
-            --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\`" \
+            --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\` | Size-optimised" \
             firmware/*
 
       # -------------------------------------------------
-      # 9. Summary
+      # 11. Summary
       # -------------------------------------------------
       - name: Summary
         run: |
           CACHE_STATUS="Miss"
-          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
-            CACHE_STATUS="Hit"
-          fi
+          [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] && CACHE_STATUS="Hit"
+
+          IMAGE_SIZE=$(du -h firmware/*sysupgrade*.bin | cut -f1)
 
           cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### Build Complete
-          - Runner: \`self-hosted\`
-          - Cache: \`$CACHE_STATUS\`
-          - [Latest Release](https://github.com/${{ github.repository }}/releases/latest)
+          ### Build Complete – Small Image
+          - **Runner**: \`self-hosted\`
+          - **Cache**: \`$CACHE_STATUS\`
+          - **Branch**: \`${{ env.OPENWRT_BRANCH }}\`
+          - **Config**: \`${{ env.CONFIG_FILE }}\`
+          - **Image size**: \`$IMAGE_SIZE\`
+          - **[Latest Release](https://github.com/${{ github.repository }}/releases/latest)**
           EOF
