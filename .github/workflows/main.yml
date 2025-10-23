@@ -63,7 +63,7 @@ jobs:
         run: |
           if [ -d "openwrt/.git" ]; then
             echo "⚠️ Existing OpenWrt directory found — removing..."
-            rm -rf openwrt
+            echo "2323" | sudo -S rm -rf openwrt
           fi
 
           echo "📥 Cloning OpenWrt repository..."
