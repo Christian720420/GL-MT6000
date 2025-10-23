@@ -24,24 +24,33 @@ env:
 
 jobs:
   build:
-    # If you have multiple self-hosted runners, add a unique label, e.g.:
-    # runs-on: [self-hosted, X64, Linux, runner-01]
-    runs-on: [self-hosted, X64, Linux]
+    # CRITICAL: Use a **unique label** per runner instance to avoid concurrency
+    # Register your runner with: ./config.sh --labels self-hosted,X64,Linux,mt6000-runner-01
+    runs-on: [self-hosted, X64, Linux, mt6000-runner-01]
     steps:
 
       # -------------------------------------------------
-      # 0. **FORCE CLEAN** – remove any leftover workspace & runner diag files
+      # 0. **FORCE CLEAN DIAGNOSTICS & WORKSPACE** – eliminates "file already exists"
       # -------------------------------------------------
-      - name: Clean workspace and runner diagnostics
+      - name: Clean runner diagnostics and workspace
         run: |
-          # Workspace
+          # Resolve runner temp directory (e.g., /home/runner/actions-runner/_work/_temp)
+          RUNNER_TEMP="${{ runner.temp }}"
+          DIAG_PAGES="$RUNNER_TEMP/_diag/pages"
+
+          echo "Cleaning diagnostic pages: $DIAG_PAGES"
+          [ -d "$DIAG_PAGES" ] && rm -rf "$DIAG_PAGES"/* || true
+
+          # Optional: clean full _diag (safe if no other jobs are running)
+          DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"  # Parent of _temp
+          [ -d "$DIAG_ROOT" ] && find "$DIAG_ROOT" -name "*.log" -delete || true
+
+          # Clean workspace
+          echo "Cleaning workspace: ${{ github.workspace }}"
           rm -rf "${{ github.workspace }}"/* || true
-          # Runner diagnostic pages (prevents "file already exists" error)
-          DIAG_DIR="${{ runner.temp }}/_diag/pages"
-          [ -d "$DIAG_DIR" ] && rm -rf "$DIAG_DIR"/* || true
 
       # -------------------------------------------------
-      # 1. Checkout GL-MT6000 repository (source of .config & files)
+      # 1. Checkout GL-MT6000 repository
       # -------------------------------------------------
       - name: Checkout GL-MT6000 repository
         uses: actions/checkout@v4
@@ -50,7 +59,7 @@ jobs:
           path: source_repo
 
       # -------------------------------------------------
-      # 2. Install system dependencies
+      # 2. Install dependencies
       # -------------------------------------------------
       - name: Install dependencies
         run: |
@@ -62,7 +71,7 @@ jobs:
             ccache rsync gawk unzip
 
       # -------------------------------------------------
-      # 3. Cache ccache – deterministic + tiered fallbacks
+      # 3. Cache ccache
       # -------------------------------------------------
       - name: Cache ccache
         uses: actions/cache@v4
@@ -84,7 +93,7 @@ jobs:
         run: ccache --show-stats || true
 
       # -------------------------------------------------
-      # 5. Clone OpenWrt (always fresh)
+      # 5. Clone OpenWrt (fresh)
       # -------------------------------------------------
       - name: Clone OpenWrt
         run: |
@@ -100,12 +109,12 @@ jobs:
 
           for i in {1..5}; do
             ./scripts/feeds update -a && ./scripts/feeds install -a && break
-            echo "Feed update failed (attempt $i) – retrying in 20s..."
+            echo "Feed update failed (attempt $i) – retrying..."
             sleep 20
           done
 
       # -------------------------------------------------
-      # 6. Prepare build environment
+      # 6. Prepare build
       # -------------------------------------------------
       - name: Prepare OpenWrt build
         run: |
@@ -122,7 +131,7 @@ jobs:
           cd openwrt
           make download -j1 || { sleep 10; make download -j1 V=s; }
           echo "Building with $(nproc) threads..."
-          make -j$(nproc) V=s || { echo "Parallel build failed – falling back to -j1"; make -j1 V=s; }
+          make -j$(nproc) V=s || { echo "Parallel failed – retrying -j1"; make -j1 V=s; }
 
           mkdir -p ../firmware
           find bin -type f \
@@ -140,7 +149,7 @@ jobs:
           path: firmware/*
 
       # -------------------------------------------------
-      # 9. Create GitHub release
+      # 9. Create release
       # -------------------------------------------------
       - name: Create release
         env:
@@ -150,32 +159,5 @@ jobs:
           gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" 2>/dev/null || true
           gh release create "gl-mt6000-${RELEASE_DATE}" \
             --repo "${{ github.repository }}" \
-            --title "OpenWrt Custom Build for GL-MT6000 (${RELEASE_DATE})" \
-            --notes "Built with \`${{ env.CONFIG_FILE }}\` from **${{ env.OPENWRT_BRANCH }}**." \
-            firmware/*
-
-      # -------------------------------------------------
-      # 10. Prune old releases (keep latest 6)
-      # -------------------------------------------------
-      - name: Clean up old releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | while read -r id tag; do
-            [ -n "$id" ] || continue
-            echo "Deleting old release $tag"
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
-            gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
-          done
-
-      # -------------------------------------------------
-      # 11. Summary
-      # -------------------------------------------------
-      - name: Summary
-        run: |
-          cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### ✅ Build Complete for GL-MT6000
-          - Branch: \`${{ env.OPENWRT_BRANCH }}\`
-          - Config: \`${{ env.CONFIG_FILE }}\`
-          - Release: [View Latest](https://github.com/${{ github.repository }}/releases/latest)
-          EOF
+            --title "OpenWrt Build for GL-MT6000 (${RELEASE_DATE})" \
+            --notes
