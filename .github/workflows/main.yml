@@ -1,4 +1,4 @@
-name: Build OpenWrt for GL-MT6000 (Self-Hosted)
+name: Build OpenWrt for GL-MT6000 (Debian Runner)
 
 permissions:
   contents: write
@@ -16,59 +16,50 @@ env:
   OPENWRT_BRANCH: openwrt-24.10
   CONFIG_FILE: mt6000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
-  CCACHE_BASEDIR: ${{ github.workspace }}
   CCACHE_COMPRESS: "1"
   CCACHE_COMPILERCHECK: content
-  CC: "ccache gcc"
-  CXX: "ccache g++"
 
 jobs:
   build:
-    # CRITICAL: Use a **unique label** per runner instance to avoid concurrency
-    # Register your runner with: ./config.sh --labels self-hosted,X64,Linux,mt6000-runner-01
-    runs-on: [self-hosted, X64, Linux, mt6000-runner-01]
+    runs-on: debian   # ← Matches your runner label
     steps:
 
       # -------------------------------------------------
-      # 0. **FORCE CLEAN DIAGNOSTICS & WORKSPACE** – eliminates "file already exists"
+      # 0. CLEAN DIAGNOSTICS & WORKSPACE
       # -------------------------------------------------
       - name: Clean runner diagnostics and workspace
         run: |
-          # Resolve runner temp directory (e.g., /home/runner/actions-runner/_work/_temp)
           RUNNER_TEMP="${{ runner.temp }}"
           DIAG_PAGES="$RUNNER_TEMP/_diag/pages"
-
-          echo "Cleaning diagnostic pages: $DIAG_PAGES"
+          echo "Cleaning: $DIAG_PAGES"
           [ -d "$DIAG_PAGES" ] && rm -rf "$DIAG_PAGES"/* || true
 
-          # Optional: clean full _diag (safe if no other jobs are running)
-          DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"  # Parent of _temp
+          DIAG_ROOT="${RUNNER_TEMP%/*}/_diag"
           [ -d "$DIAG_ROOT" ] && find "$DIAG_ROOT" -name "*.log" -delete || true
 
-          # Clean workspace
           echo "Cleaning workspace: ${{ github.workspace }}"
           rm -rf "${{ github.workspace }}"/* || true
 
       # -------------------------------------------------
-      # 1. Checkout GL-MT6000 repository
+      # 1. Checkout config repo
       # -------------------------------------------------
-      - name: Checkout GL-MT6000 repository
+      - name: Checkout GL-MT6000 config
         uses: actions/checkout@v4
         with:
           repository: Christian720420/GL-MT6000
           path: source_repo
 
       # -------------------------------------------------
-      # 2. Install dependencies
+      # 2. Install Debian packages
       # -------------------------------------------------
       - name: Install dependencies
         run: |
-          echo "2323" | sudo -S apt update -qq
-          sudo apt install -y \
-            build-essential libncurses-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool \
+          echo "2323" | sudo APT_UPDATE=1 apt update -qq
+          echo "2323" | sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+            build-essential libncurses5-dev libssl-dev \
+            python3-setuptools zlib1g-dev libtool-bin \
             autoconf automake pkg-config git curl wget \
-            ccache rsync gawk unzip
+            ccache rsync gawk unzip time
 
       # -------------------------------------------------
       # 3. Cache ccache
@@ -77,87 +68,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: >-
-            selfrunner-ccache-${{ runner.os }}-${{ runner.arch }}-
-            ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            ${{ hashFiles('source_repo/feeds.conf*') || 'no-feeds' }}
+          key: ccache-debian-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
           restore-keys: |
-            selfrunner-ccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            selfrunner-ccache-${{ runner.os }}-${{ runner.arch }}-
-            selfrunner-ccache-
+            ccache-debian-${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
+            ccache-debian-
+
+      - name: ccache stats
+        run: ccache -s
 
       # -------------------------------------------------
-      # 4. Show ccache stats
-      # -------------------------------------------------
-      - name: Show ccache status
-        run: ccache --show-stats || true
-
-      # -------------------------------------------------
-      # 5. Clone OpenWrt (fresh)
-      # -------------------------------------------------
-      - name: Clone OpenWrt
-        run: |
-          rm -rf openwrt
-          git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
-          cd openwrt
-
-          git config --global http.postBuffer 524288000
-          git config --global http.lowSpeedLimit 0
-          git config --global http.lowSpeedTime 999999
-          git config --global core.compression 0
-          git config --global url."https://github.com/".insteadOf git://github.com/
-
-          for i in {1..5}; do
-            ./scripts/feeds update -a && ./scripts/feeds install -a && break
-            echo "Feed update failed (attempt $i) – retrying..."
-            sleep 20
-          done
-
-      # -------------------------------------------------
-      # 6. Prepare build
-      # -------------------------------------------------
-      - name: Prepare OpenWrt build
-        run: |
-          cd openwrt
-          cp ../source_repo/${{ env.CONFIG_FILE }} .config
-          [ -d ../source_repo/files ] && cp -r ../source_repo/files ./files || true
-          make defconfig
-
-      # -------------------------------------------------
-      # 7. Build firmware
-      # -------------------------------------------------
-      - name: Build firmware
-        run: |
-          cd openwrt
-          make download -j1 || { sleep 10; make download -j1 V=s; }
-          echo "Building with $(nproc) threads..."
-          make -j$(nproc) V=s || { echo "Parallel failed – retrying -j1"; make -j1 V=s; }
-
-          mkdir -p ../firmware
-          find bin -type f \
-            \( -iname '*sysupgrade*.bin' -o -iname 'sha256sums' -o -iname 'config.buildinfo' \) \
-            -exec mv -v {} ../firmware/ \;
-          mv .config ../firmware/full.config
-
-      # -------------------------------------------------
-      # 8. Upload artifacts
-      # -------------------------------------------------
-      - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gl-mt6000-firmware
-          path: firmware/*
-
-      # -------------------------------------------------
-      # 9. Create release
-      # -------------------------------------------------
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RELEASE_DATE=$(date +%F)
-          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" 2>/dev/null || true
-          gh release create "gl-mt6000-${RELEASE_DATE}" \
-            --repo "${{ github.repository }}" \
-            --title "OpenWrt Build for GL-MT6000 (${RELEASE_DATE})" \
-            --notes
+      # 4. Clone
