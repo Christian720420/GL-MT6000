@@ -14,7 +14,7 @@ on:
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: wr3000.conf
+  CONFIG_FILE: wr3000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_COMPRESS: "1"
   CCACHE_COMPILERCHECK: content
