@@ -1,171 +1,60 @@
-name: Build OpenWrt Cudy WR3000
-
-permissions:
-  contents: write
-  actions: write
+name: Build OpenWrt WR3000 Firmware
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
-  schedule:
-    - cron: "38 1 * * *"   # daily 01:38 UTC
-
-env:
-  OPENWRT_REPO: https://github.com/openwrt/openwrt.git
-  OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: wr3000.config
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  CCACHE_COMPRESS: "1"
-  CCACHE_COMPILERCHECK: content
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: self-hosted
+    env:
+      CONFIG_FILE: wr3000.config
+      OPENWRT_BRANCH: openwrt-24.10
+      CCACHE_DIR: /home/runner/.ccache
+
     steps:
-      # -------------------------------------------------
-      # 0. Clean only diagnostic logs
-      # -------------------------------------------------
-      - name: Clean runner diagnostics
-        run: |
-          DIAG_ROOT="/home/runner/actions-runner/_diag"
-          echo "Cleaning $DIAG_ROOT ..."
-          rm -rf "$DIAG_ROOT/pages"/* 2>/dev/null || true
-          find "$DIAG_ROOT" -type f -name "*.log" -delete 2>/dev/null || true
-
-      # -------------------------------------------------
-      # 1. Checkout this repository (your fork)
-      # -------------------------------------------------
-      - name: Checkout WR3000 config
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          repository: Christian720420/GL-MT6000
-          path: source_repo
-          token: ${{ github.token }}
-          persist-credentials: true
 
-      # -------------------------------------------------
-      # 2. Install build dependencies
-      # -------------------------------------------------
-      - name: Install dependencies
-        run: |
-          echo "2323" | sudo -S apt update -qq
-          echo "2323" | sudo -S DEBIAN_FRONTEND=noninteractive apt install -y \
-            build-essential libncurses5-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool-bin \
-            autoconf automake pkg-config git curl wget \
-            ccache rsync gawk unzip time quilt
-
-      # -------------------------------------------------
-      # 3. Restore ccache
-      # -------------------------------------------------
-      - name: Cache ccache
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: >-
-            ccache-${{ runner.os }}-${{ runner.arch }}-
-            ${{ hashFiles('source_repo/${{ env.CONFIG_FILE }}') }}-
-            ${{ hashFiles('source_repo/feeds.conf*') || 'nofeeds' }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ runner.arch }}-
-            ccache-
-
-      - name: ccache stats (pre-build)
-        run: ccache -s
-
-      # -------------------------------------------------
-      # 4. Clone OpenWrt & update feeds
-      # -------------------------------------------------
-      - name: Clone OpenWrt & update feeds
+      - name: Clean old build directories
         run: |
           rm -rf openwrt
-          git clone --depth 1 -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
+          rm -rf $CCACHE_DIR || true
+          mkdir -p $CCACHE_DIR
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential ccache git python3 unzip wget rsync time
+
+      - name: Clone OpenWrt & update feeds
+        run: |
+          set -eux
+          git clone https://github.com/openwrt/openwrt.git -b $OPENWRT_BRANCH openwrt
           cd openwrt
-
-          cp ../source_repo/feeds.conf.default ./feeds.conf.default
-
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # -------------------------------------------------
-      # 5. Apply .config (WR3000 config)
-      # -------------------------------------------------
-      - name: Prepare .config
+      - name: Copy custom configuration
         run: |
+          cp $CONFIG_FILE openwrt/.config
           cd openwrt
-          cp ../source_repo/${{ env.CONFIG_FILE }} .config
           make defconfig
 
-      # -------------------------------------------------
-      # 6. Download sources
-      # -------------------------------------------------
-      - name: Download sources
-        run: |
-          cd openwrt
-          make download -j$(nproc) V=s || make download -j1 V=s
-
-      # -------------------------------------------------
-      # 7. Build firmware
-      # -------------------------------------------------
       - name: Build firmware
         run: |
           cd openwrt
-          make -j$(nproc) V=s || make -j1 V=s
+          make -j$(nproc) || make -j1 V=s
 
-          mkdir -p ../firmware
-          find bin -type f \( -name '*sysupgrade*.bin' -o -name 'sha256sums' -o -name 'config.buildinfo' \) \
-            -exec mv -v {} ../firmware/ \;
-          mv .config ../firmware/full.config
-
-      # -------------------------------------------------
-      # 8. Strip binaries (optional)
-      # -------------------------------------------------
-      - name: Strip binaries
+      - name: Show build size
         run: |
-          find firmware -name '*sysupgrade*.bin' -exec \
-            sh -c 'strip --strip-unneeded "$1" 2>/dev/null || true' _ {} \;
+          cd openwrt
+          ls -lh bin/targets/*/*/
 
-      # -------------------------------------------------
-      # 9. Upload artifacts
-      # -------------------------------------------------
-      - name: Upload firmware
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cudy-wr3000-firmware
-          path: firmware/*
-
-      # -------------------------------------------------
-      # 10. Create GitHub release
-      # -------------------------------------------------
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          DATE=$(date +%F)
-          gh release delete "wr3000-$DATE" --cleanup-tag -y 2>/dev/null || true
-          gh release create "wr3000-$DATE" \
-            --title "Cudy WR3000 OpenWrt ($DATE)" \
-            --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\`" \
-            firmware/*
-
-      # -------------------------------------------------
-      # 11. Summary
-      # -------------------------------------------------
-      - name: Summary
-        run: |
-          CACHE_STATUS="Miss"
-          [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] && CACHE_STATUS="Hit"
-
-          IMAGE_SIZE=$(du -h firmware/*sysupgrade*.bin | cut -f1)
-
-          cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### ✅ Build Complete – Cudy WR3000
-          - **Runner**: \`self-hosted\`
-          - **Cache**: \`$CACHE_STATUS\`
-          - **Branch**: \`${{ env.OPENWRT_BRANCH }}\`
-          - **Config**: \`${{ env.CONFIG_FILE }}\`
-          - **Image size**: \`$IMAGE_SIZE\`
-          - **[Latest Release](https://github.com/${{ github.repository }}/releases/latest)**
-          EOF
+          name: openwrt-wr3000-firmware
+          path: openwrt/bin/targets/
