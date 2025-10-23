@@ -25,7 +25,7 @@ jobs:
     steps:
 
       # -------------------------------------------------
-      # 0. Clean runner diagnostics (safe)
+      # 0. Clean only diagnostic logs (safe)
       # -------------------------------------------------
       - name: Clean runner diagnostics
         run: |
@@ -35,12 +35,12 @@ jobs:
           find "$DIAG_ROOT" -type f -name "*.log" -delete 2>/dev/null || true
 
       # -------------------------------------------------
-      # 1. Checkout private config repo
+      # 1. Checkout config repo (updated to cjom/GL-MT6000)
       # -------------------------------------------------
       - name: Checkout GL-MT6000 config
         uses: actions/checkout@v4
         with:
-          repository: Christian720420/GL-MT6000
+          repository: cjom/GL-MT6000
           path: source_repo
           token: ${{ github.token }}
           persist-credentials: true
@@ -122,109 +122,7 @@ jobs:
           CONFIG_PACKAGE_kmod-mt7986-firmware=y
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
-          CONFIG_PACKAGE_luci-mod-admin-full=n
+          CONFIG_PACKAGE_luci-mod-admin=n
           CONFIG_PACKAGE_luci-ssl=n
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-opkg=y
-          CONFIG_PACKAGE_luci-proto-ipv6=n
-          CONFIG_PACKAGE_luci-proto-ppp=y
-          CONFIG_PACKAGE_uhttpd=y
-          CONFIG_PACKAGE_uhttpd-mod-ubus=y
-          CONFIG_PACKAGE_dnsmasq=y
-          CONFIG_PACKAGE_iptables=y
-          CONFIG_PACKAGE_ip6tables=n
-          CONFIG_PACKAGE_kmod-nf-conntrack=y
-          CONFIG_PACKAGE_kmod-nf-nat=y
-          CONFIG_PACKAGE_kmod-ipt-conntrack=y
-          CONFIG_PACKAGE_kmod-ipt-nat=y
-          CONFIG_PACKAGE_dropbear=y
-          CONFIG_PACKAGE_wpad-basic=y
-          CONFIG_PACKAGE_hostapd-common=y
-
-          # Remove bloat
-          CONFIG_PACKAGE_python3=n
-          CONFIG_PACKAGE_php8=n
-          CONFIG_PACKAGE_lua=n
-          CONFIG_PACKAGE_luci-app-ttyd=n
-          CONFIG_PACKAGE_luci-app-statistics=n
-          CONFIG_PACKAGE_luci-app-sqm=n
-          CONFIG_PACKAGE_luci-app-travelmate=n
-          CONFIG_PACKAGE_luci-app-vpn*=n
-          CONFIG_PACKAGE_*doc*=n
-          CONFIG_PACKAGE_*example*=n
-          CONFIG_PACKAGE_*test*=n
-          EOF
-
-          make defconfig
-
-      # -------------------------------------------------
-      # 6. Download sources
-      # -------------------------------------------------
-      - name: Download sources
-        run: |
-          cd openwrt
-          make download -j$(nproc) V=s || make download -j1 V=s
-
-      # -------------------------------------------------
-      # 7. Build (parallel + fallback)
-      # -------------------------------------------------
-      - name: Build firmware
-        run: |
-          cd openwrt
-          make -j$(nproc) V=s || make -j1 V=s
-
-          mkdir -p ../firmware
-          find bin -type f \( -name '*sysupgrade*.bin' -o -name 'sha256sums' -o -name 'config.buildinfo' \) \
-            -exec mv -v {} ../firmware/ \;
-          mv .config ../firmware/full.config
-
-      # -------------------------------------------------
-      # 8. Strip binaries (extra size reduction)
-      # -------------------------------------------------
-      - name: Strip binaries
-        run: |
-          find firmware -name '*sysupgrade*.bin' -exec \
-            sh -c 'strip --strip-unneeded "$1" 2>/dev/null || true' _ {} \;
-
-      # -------------------------------------------------
-      # 9. Upload artifacts
-      # -------------------------------------------------
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: gl-mt6000-firmware
-          path: firmware/*
-
-      # -------------------------------------------------
-      # 10. Create GitHub release
-      # -------------------------------------------------
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          DATE=$(date +%F)
-          gh release delete "gl-mt6000-$DATE" --cleanup-tag -y 2>/dev/null || true
-          gh release create "gl-mt6000-$DATE" \
-            --title "GL-MT6000 OpenWrt ($DATE)" \
-            --notes "Self-hosted build | Config: \`${{ env.CONFIG_FILE }}\` | Size-optimised" \
-            firmware/*
-
-      # -------------------------------------------------
-      # 11. Summary
-      # -------------------------------------------------
-      - name: Summary
-        run: |
-          CACHE_STATUS="Miss"
-          [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] && CACHE_STATUS="Hit"
-
-          IMAGE_SIZE=$(du -h firmware/*sysupgrade*.bin | cut -f1)
-
-          cat <<EOF >> $GITHUB_STEP_SUMMARY
-          ### Build Complete – Small Image
-          - **Runner**: \`self-hosted\`
-          - **Cache**: \`$CACHE_STATUS\`
-          - **Branch**: \`${{ env.OPENWRT_BRANCH }}\`
-          - **Config**: \`${{ env.CONFIG_FILE }}\`
-          - **Image size**: \`$IMAGE_SIZE\`
-          - **[Latest Release](https://github.com/${{ github.repository }}/releases/latest)**
-          EOF
