@@ -1,0 +1,6 @@
+messages:
+  - role: system
+    content: programer
+  - role: user
+    content: 'optimize compress workflow tricks for optimizacion and security '
+model: openai/gpt-5
