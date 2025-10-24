@@ -3,10 +3,9 @@ name: Advanced OpenWrt WR3000 Build
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [ main ]
   schedule:
-    - cron: "0 3 * * *" # daily 03:00 UTC
+    - cron: "0 3 * * *" # Daily 03:00 UTC build
 
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
@@ -27,92 +26,100 @@ jobs:
       CONFIG_FILE: "wr3000.config"
 
     steps:
-
-      # 0️⃣ Checkout repo
+      # 0️⃣ Checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1️⃣ Install dependencies
+      # 1️⃣ Ensure non-interactive apt & pre-sudo permissions
+      - name: Configure Sudo (Optional)
+        run: |
+          echo "%sudo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner || true
+          sudo apt update -y
+
+      # 2️⃣ Install dependencies
       - name: Install Build Dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential libncurses-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool-bin autoconf automake \
-            pkg-config git curl wget ccache rsync gawk unzip time \
-            quilt diffstat ed gettext
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+            build-essential libncurses-dev libssl-dev zlib1g-dev libtool-bin \
+            autoconf automake pkg-config git curl wget ccache rsync gawk unzip time \
+            python3-setuptools python3-distutils quilt diffstat ed gettext subversion
 
-      # 2️⃣ Setup ccache
+      # 3️⃣ Setup ccache
       - name: Setup ccache
         run: |
-          mkdir -p $CCACHE_DIR
-          export CCACHE_DIR=$CCACHE_DIR
+          mkdir -p "$CCACHE_DIR"
+          export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
           ccache -M 20G
           ccache -z
+        shell: bash
 
-      # 3️⃣ Clean old build
+      # 4️⃣ Clean workspace
       - name: Clean Old Build
         run: |
           rm -rf openwrt
-          mkdir -p $DL_DIR
-          mkdir -p $FEEDS_DIR
+          mkdir -p "$DL_DIR" "$FEEDS_DIR"
 
-      # 4️⃣ Clone OpenWrt
+      # 5️⃣ Clone OpenWrt source
       - name: Clone OpenWrt
         run: |
-          git clone --depth 1 -b $OPENWRT_BRANCH $OPENWRT_REPO openwrt
+          git clone --depth 1 -b "$OPENWRT_BRANCH" "$OPENWRT_REPO" openwrt
 
-      # 5️⃣ Update & install feeds (retry on failure)
+      # 6️⃣ Update feeds with retry
       - name: Update & Install Feeds
         run: |
           cd openwrt
           git config --global http.postBuffer 524288000
           for i in {1..5}; do
-              ./scripts/feeds update -a && break || echo "Retry $i failed, waiting..." && sleep 10
+            ./scripts/feeds update -a && break || {
+              echo "Feed update attempt $i failed, retrying in 15s..."
+              sleep 15
+            }
           done
           ./scripts/feeds install -a
 
-      # 6️⃣ Apply custom configuration
-      - name: Copy Custom Config
+      # 7️⃣ Apply custom configuration
+      - name: Apply Custom Config
         run: |
-          cp $CONFIG_FILE openwrt/.config
+          cp "$CONFIG_FILE" openwrt/.config
           cd openwrt
           make defconfig
 
-      # 7️⃣ Pre-download sources
-      - name: Pre-download Sources
+      # 8️⃣ Pre-download all sources
+      - name: Download Sources
         run: |
           cd openwrt
-          make download -j$(nproc) V=s || make download -j1 V=s
+          make download -j"$(nproc)" V=s || make download -j1 V=s
 
-      # 8️⃣ Build firmware
+      # 9️⃣ Build Firmware
       - name: Build Firmware
         run: |
           cd openwrt
-          export CCACHE_DIR=$CCACHE_DIR
+          export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
-          make -j$(nproc) V=s || make -j1 V=s
+          make -j"$(nproc)" V=s || make -j1 V=s
 
-      # 9️⃣ Strip binaries
-      - name: Strip Binaries
+      # 🔟 Strip and compress images
+      - name: Optimize Binaries
         run: |
           cd openwrt
           find bin/ -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; || true
+          gzip -9 bin/targets/*/*sysupgrade*.bin || true
 
-      # 🔟 Generate SHA256 checksums
+      # 1️⃣1️⃣ Generate SHA256 checksums
       - name: Generate Checksums
         run: |
-          cd openwrt/bin/targets/*
-          sha256sum *sysupgrade*.bin > SHA256SUMS.txt
+          cd openwrt/bin/targets/*/*
+          sha256sum *sysupgrade*.bin.gz > SHA256SUMS.txt
 
-      # 1️⃣1️⃣ Upload artifacts
+      # 1️⃣2️⃣ Upload build artifacts
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-${{ matrix.device }}
-          path: openwrt/bin/targets/*
+          path: openwrt/bin/targets/*/*
 
-      # 1️⃣2️⃣ Create GitHub release
+      # 1️⃣3️⃣ Create GitHub Release
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -123,24 +130,16 @@ jobs:
           gh release delete "$RELEASE_NAME" --cleanup-tag -y 2>/dev/null || true
           gh release create "$RELEASE_NAME" \
             --title "OpenWrt $DEVICE Build ($DATE)" \
-            --notes "Self-hosted build | Config: $CONFIG_FILE | Optimized for size, security, and performance" \
-            bin/targets/*
+            --notes "Built on self-hosted runner with full ccache and optimization" \
+            bin/targets/*/*sysupgrade*.bin.gz bin/targets/*/*SHA256SUMS.txt
 
-      # 1️⃣3️⃣ Build summary & ccache stats
+      # 1️⃣4️⃣ Build summary
       - name: Build Summary
         run: |
-          IMAGE_SIZE=$(du -h openwrt/bin/targets/*/*sysupgrade*.bin | cut -f1)
-          echo "### Build Summary for $DEVICE" >> $GITHUB_STEP_SUMMARY
+          IMAGE_SIZE=$(du -h openwrt/bin/targets/*/*sysupgrade*.bin.gz | cut -f1)
+          echo "### ✅ Build Summary for $DEVICE" >> $GITHUB_STEP_SUMMARY
           echo "- Image size: $IMAGE_SIZE" >> $GITHUB_STEP_SUMMARY
           echo "- CCACHE Stats:" >> $GITHUB_STEP_SUMMARY
           ccache -s >> $GITHUB_STEP_SUMMARY
           echo "- OpenWrt Branch: $OPENWRT_BRANCH" >> $GITHUB_STEP_SUMMARY
           echo "- Config File: $CONFIG_FILE" >> $GITHUB_STEP_SUMMARY
-
-      # 1️⃣4️⃣ Optional: Telegram/Slack notification
-      #- name: Send Telegram Notification
-      #  uses: appleboy/telegram-action@v0.2.0
-      #  with:
-      #    to: ${{ secrets.TELEGRAM_CHAT_ID }}
-      #    token: ${{ secrets.TELEGRAM_TOKEN }}
-      #    message: "OpenWrt $DEVICE build completed. Check artifacts and release!"
