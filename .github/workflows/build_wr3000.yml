@@ -15,6 +15,15 @@ jobs:
       CCACHE_DIR: /home/runner/.ccache
 
     steps:
+      - name: Build firmware (using ccache)
+  run: |
+    cd openwrt
+    export CCACHE_DIR=$CCACHE_DIR
+    export PATH="/usr/lib/ccache:$PATH"
+    ccache -z
+    make -j$(nproc) V=s
+    ccache -s
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
