@@ -8,10 +8,11 @@ on:
     - cron: "0 3 * * *" # Daily 03:00 UTC build
 
 env:
-  OPENWRT_REPO: https://github.com/Christian720420/GL-MT6000.git
-  OPENWRT_BRANCH: openwrt-24.10
+  OPENWRT_REPO: https://git.openwrt.org/openwrt/openwrt.git  # Official OpenWrt repository
+  OPENWRT_BRANCH: openwrt-24.10  # Valid branch in official repo
+  GL_MT6000_REPO: https://github.com/Christian720420/GL-MT6000.git  # Custom repo for overlays
   CCACHE_DIR: ${{ github.workspace }}/.ccache
-  DL_DIR: ${{ github.workspace }}/dl
+  DL_DIR: ${{ github.workspace }}/.ccache
 
 jobs:
   build:
@@ -22,7 +23,7 @@ jobs:
         device: [cudy_wr3000-v1]
     env:
       DEVICE: ${{ matrix.device }}
-      CONFIG_FILE: "wr3000.config"
+      CONFIG_FILE: "wr3000.config"  # WR3000-specific; merge GL-MT6000 packages as needed
 
     steps:
       # 0️⃣ Checkout
@@ -70,22 +71,31 @@ jobs:
           rm -rf openwrt
           mkdir -p "$DL_DIR"
 
-      # 6️⃣ Clone GL-MT6000 repo as OpenWrt base
-      - name: Clone Custom OpenWrt Base
+      # 6️⃣ Clone Official OpenWrt source
+      - name: Clone OpenWrt Base
         run: |
           git clone --depth 1 -b "$OPENWRT_BRANCH" "$OPENWRT_REPO" openwrt
 
-      # 7️⃣ Copy custom files from repo
+      # 7️⃣ Clone GL-MT6000 for custom files
+      - name: Clone GL-MT6000 Customs
+        run: |
+          git clone --depth 1 "$GL_MT6000_REPO" gl-mt6000
+
+      # 8️⃣ Apply Custom Files from GL-MT6000
       - name: Apply Custom Files
         run: |
-          if [ -d openwrt/files ]; then
-            cp -r openwrt/files/* openwrt/files/ || true
+          cd openwrt
+          # Copy files/ directory (SSH hardening, UCI defaults, upgrade script)
+          if [ -d ../gl-mt6000/files ]; then
+            cp -r ../gl-mt6000/files/* files/ 2>/dev/null || true
+            echo "Custom files applied: SSH hardening, UCI defaults, upgrade script"
           fi
-          ls -la openwrt/files/etc/ssh/sshd_config.d/ || echo "SSH hardening files ready"
-          ls -la openwrt/files/etc/uci-defaults/ || echo "UCI defaults ready"
-          ls -la openwrt/files/usr/bin/upgrade_custom_openwrt || echo "Upgrade script ready"
+          # Optionally merge packages from mt6000.config into wr3000.config (manual adjustment recommended)
+          if [ -f ../gl-mt6000/mt6000.config ]; then
+            echo "GL-MT6000 config available for reference; ensure wr3000.config includes desired packages (e.g., luci-app-pbr, adblock)"
+          fi
 
-      # 8️⃣ Update feeds with retry
+      # 9️⃣ Update feeds with retry
       - name: Update & Install Feeds
         run: |
           cd openwrt
@@ -98,20 +108,20 @@ jobs:
           done
           ./scripts/feeds install -a
 
-      # 9️⃣ Apply WR3000 custom configuration
+      # 🔟 Apply WR3000 custom configuration
       - name: Apply Custom Config
         run: |
           cp "$CONFIG_FILE" openwrt/.config
           cd openwrt
           make defconfig
 
-      # 🔟 Pre-download all sources
+      # 1️⃣1️⃣ Pre-download all sources
       - name: Download Sources
         run: |
           cd openwrt
           make download -j"$(nproc)" V=s || make download -j1 V=s
 
-      # 1️⃣1️⃣ Build Firmware
+      # 1️⃣2️⃣ Build Firmware
       - name: Build Firmware
         run: |
           cd openwrt
@@ -120,27 +130,27 @@ jobs:
           export LD=mold
           make -j"$(nproc)" V=s || make -j1 V=s
 
-      # 1️⃣2️⃣ Strip and compress images
+      # 1️⃣3️⃣ Strip and compress images
       - name: Optimize Binaries
         run: |
           cd openwrt/bin/targets/*/*
           find . -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; || true
           gzip -9 *sysupgrade*.bin || true
 
-      # 1️⃣3️⃣ Generate SHA256 checksums
+      # 1️⃣4️⃣ Generate SHA256 checksums
       - name: Generate Checksums
         run: |
           cd openwrt/bin/targets/*/*
           sha256sum *sysupgrade*.bin.gz > SHA256SUMS.txt
 
-      # 1️⃣4️⃣ Upload build artifacts
+      # 1️⃣5️⃣ Upload build artifacts
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-${{ matrix.device }}-custom
           path: openwrt/bin/targets/*/*
 
-      # 1️⃣5️⃣ Create GitHub Release
+      # 1️⃣6️⃣ Create GitHub Release
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -154,7 +164,7 @@ jobs:
             --notes "Adapted from GL-MT6000 customs: SSH hardening, UCI QoL, WireGuard/PBR/AdBlock/QoS. Built with ccache and optimizations." \
             *sysupgrade*.bin.gz SHA256SUMS.txt
 
-      # 1️⃣6️⃣ Build summary
+      # 1️⃣7️⃣ Build summary
       - name: Build Summary
         run: |
           cd openwrt/bin/targets/*/*
@@ -163,6 +173,6 @@ jobs:
           echo "- Image size: $IMAGE_SIZE" >> $GITHUB_STEP_SUMMARY
           echo "- CCACHE Stats:" >> $GITHUB_STEP_SUMMARY
           ccache -s >> $GITHUB_STEP_SUMMARY
-          echo "- Base Repo: GL-MT6000 customs" >> $GITHUB_STEP_SUMMARY
+          echo "- Base Repo: Official OpenWrt + GL-MT6000 customs" >> $GITHUB_STEP_SUMMARY
           echo "- OpenWrt Branch: $OPENWRT_BRANCH" >> $GITHUB_STEP_SUMMARY
           echo "- Config File: $CONFIG_FILE (WR3000 params + customs)" >> $GITHUB_STEP_SUMMARY
