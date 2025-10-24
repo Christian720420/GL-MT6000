@@ -1,18 +1,16 @@
-name: Ultimate OpenWrt WR3000 Build
+name: Advanced OpenWrt WR3000 Build
 
-# Trigger
 on:
   workflow_dispatch:
   push:
     branches:
       - main
   schedule:
-    - cron: "0 2 * * *"  # daily build at 02:00 UTC
+    - cron: "0 3 * * *" # daily 03:00 UTC
 
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: wr3000.config
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   DL_DIR: ${{ github.workspace }}/dl
   FEEDS_DIR: ${{ github.workspace }}/feeds
@@ -20,29 +18,28 @@ env:
 jobs:
   build:
     runs-on: self-hosted
-    timeout-minutes: 480
+    timeout-minutes: 600
     strategy:
       matrix:
-        device: [cudy_wr3000-v1]  # Expandable for multiple devices
+        device: [cudy_wr3000-v1, cudy_wr3000-v2]
     env:
       DEVICE: ${{ matrix.device }}
+      CONFIG_FILE: "wr3000.config"
 
     steps:
-      # 0️⃣ Checkout repository
+
+      # 0️⃣ Checkout repo
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       # 1️⃣ Install dependencies
       - name: Install Build Dependencies
         run: |
           sudo apt update
-          sudo apt install -y \
-            build-essential libncurses-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool-bin \
-            autoconf automake pkg-config git curl wget \
-            ccache rsync gawk unzip time quilt diffstat ed gettext
+          sudo apt install -y build-essential libncurses-dev libssl-dev \
+            python3-setuptools zlib1g-dev libtool-bin autoconf automake \
+            pkg-config git curl wget ccache rsync gawk unzip time \
+            quilt diffstat ed gettext
 
       # 2️⃣ Setup ccache
       - name: Setup ccache
@@ -50,11 +47,11 @@ jobs:
           mkdir -p $CCACHE_DIR
           export CCACHE_DIR=$CCACHE_DIR
           export PATH="/usr/lib/ccache:$PATH"
-          ccache -M 20G      # max cache size
-          ccache -z          # zero stats
+          ccache -M 20G
+          ccache -z
 
-      # 3️⃣ Clean previous build
-      - name: Clean Old Builds
+      # 3️⃣ Clean old build
+      - name: Clean Old Build
         run: |
           rm -rf openwrt
           mkdir -p $DL_DIR
@@ -65,14 +62,17 @@ jobs:
         run: |
           git clone --depth 1 -b $OPENWRT_BRANCH $OPENWRT_REPO openwrt
 
-      # 5️⃣ Setup feeds
-      - name: Update and Install Feeds
+      # 5️⃣ Update & install feeds (retry on failure)
+      - name: Update & Install Feeds
         run: |
           cd openwrt
-          ./scripts/feeds update -a
+          git config --global http.postBuffer 524288000
+          for i in {1..5}; do
+              ./scripts/feeds update -a && break || echo "Retry $i failed, waiting..." && sleep 10
+          done
           ./scripts/feeds install -a
 
-      # 6️⃣ Apply custom device config
+      # 6️⃣ Apply custom configuration
       - name: Copy Custom Config
         run: |
           cp $CONFIG_FILE openwrt/.config
@@ -91,25 +91,26 @@ jobs:
           cd openwrt
           export CCACHE_DIR=$CCACHE_DIR
           export PATH="/usr/lib/ccache:$PATH"
-          # Parallel build with fallback
           make -j$(nproc) V=s || make -j1 V=s
 
-      # 9️⃣ Show ccache stats
-      - name: Show ccache stats
-        run: ccache -s
-
-      # 🔟 Strip binaries for minimal size
+      # 9️⃣ Strip binaries
       - name: Strip Binaries
         run: |
           cd openwrt
           find bin/ -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; || true
 
+      # 🔟 Generate SHA256 checksums
+      - name: Generate Checksums
+        run: |
+          cd openwrt/bin/targets/*
+          sha256sum *sysupgrade*.bin > SHA256SUMS.txt
+
       # 1️⃣1️⃣ Upload artifacts
-      - name: Upload Firmware Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-firmware-${{ matrix.device }}
-          path: openwrt/bin/targets/*/*
+          name: openwrt-${{ matrix.device }}
+          path: openwrt/bin/targets/*
 
       # 1️⃣2️⃣ Create GitHub release
       - name: Create GitHub Release
@@ -123,9 +124,9 @@ jobs:
           gh release create "$RELEASE_NAME" \
             --title "OpenWrt $DEVICE Build ($DATE)" \
             --notes "Self-hosted build | Config: $CONFIG_FILE | Optimized for size, security, and performance" \
-            bin/targets/*/*
+            bin/targets/*
 
-      # 1️⃣3️⃣ Summary
+      # 1️⃣3️⃣ Build summary & ccache stats
       - name: Build Summary
         run: |
           IMAGE_SIZE=$(du -h openwrt/bin/targets/*/*sysupgrade*.bin | cut -f1)
@@ -135,3 +136,11 @@ jobs:
           ccache -s >> $GITHUB_STEP_SUMMARY
           echo "- OpenWrt Branch: $OPENWRT_BRANCH" >> $GITHUB_STEP_SUMMARY
           echo "- Config File: $CONFIG_FILE" >> $GITHUB_STEP_SUMMARY
+
+      # 1️⃣4️⃣ Optional: Telegram/Slack notification
+      #- name: Send Telegram Notification
+      #  uses: appleboy/telegram-action@v0.2.0
+      #  with:
+      #    to: ${{ secrets.TELEGRAM_CHAT_ID }}
+      #    token: ${{ secrets.TELEGRAM_TOKEN }}
+      #    message: "OpenWrt $DEVICE build completed. Check artifacts and release!"
