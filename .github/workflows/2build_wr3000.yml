@@ -8,8 +8,8 @@ on:
     - cron: "0 3 * * *" # Daily 03:00 UTC build
 
 env:
-  OPENWRT_REPO: https://github.com/Christian720420/GL-MT6000.git  # Use GL-MT6000 repo as base for customs
-  OPENWRT_BRANCH: openwrt-24.10  # Aligns with stable; adjust for kernel 6.12.x if needed
+  OPENWRT_REPO: https://github.com/Christian720420/GL-MT6000.git
+  OPENWRT_BRANCH: openwrt-24.10
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   DL_DIR: ${{ github.workspace }}/dl
 
@@ -22,7 +22,7 @@ jobs:
         device: [cudy_wr3000-v1]
     env:
       DEVICE: ${{ matrix.device }}
-      CONFIG_FILE: "wr3000.config"  # WR3000-specific config; include customs like WireGuard, PBR, AdBlock
+      CONFIG_FILE: "wr3000.config"
 
     steps:
       # 0️⃣ Checkout
@@ -52,8 +52,7 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
             build-essential libncurses-dev libssl-dev zlib1g-dev libtool-bin \
             autoconf automake pkg-config git curl wget ccache rsync gawk unzip time \
-            python3-setuptools python3-distutils quilt diffstat ed gettext subversion \
-            mold  # Added for GL-MT6000-style linker optimizations
+            python3-setuptools quilt diffstat ed gettext subversion mold
 
       # 4️⃣ Setup ccache
       - name: Setup ccache
@@ -71,19 +70,17 @@ jobs:
           rm -rf openwrt
           mkdir -p "$DL_DIR"
 
-      # 6️⃣ Clone GL-MT6000 repo as OpenWrt base (includes custom files)
+      # 6️⃣ Clone GL-MT6000 repo as OpenWrt base
       - name: Clone Custom OpenWrt Base
         run: |
           git clone --depth 1 -b "$OPENWRT_BRANCH" "$OPENWRT_REPO" openwrt
 
-      # 7️⃣ Copy custom files from repo (SSH hardening, UCI defaults, upgrade script)
+      # 7️⃣ Copy custom files from repo
       - name: Apply Custom Files
         run: |
-          # Copy files/ directory contents (adaptable from GL-MT6000)
           if [ -d openwrt/files ]; then
-            cp -r openwrt/files/* openwrt/files/ || true  # Overwrite if exists
+            cp -r openwrt/files/* openwrt/files/ || true
           fi
-          # Ensure key custom files are present (e.g., for SSH, UCI, upgrade)
           ls -la openwrt/files/etc/ssh/sshd_config.d/ || echo "SSH hardening files ready"
           ls -la openwrt/files/etc/uci-defaults/ || echo "UCI defaults ready"
           ls -la openwrt/files/usr/bin/upgrade_custom_openwrt || echo "Upgrade script ready"
@@ -101,7 +98,7 @@ jobs:
           done
           ./scripts/feeds install -a
 
-      # 9️⃣ Apply WR3000 custom configuration (overrides for device)
+      # 9️⃣ Apply WR3000 custom configuration
       - name: Apply Custom Config
         run: |
           cp "$CONFIG_FILE" openwrt/.config
@@ -120,7 +117,6 @@ jobs:
           cd openwrt
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
-          # Enable MOLD linker if configured in .config for optimizations
           export LD=mold
           make -j"$(nproc)" V=s || make -j1 V=s
 
