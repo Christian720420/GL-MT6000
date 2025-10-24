@@ -53,17 +53,6 @@ jobs:
           fetch-depth: 0
 
       # -------------------------
-      # Install dependencies
-      # -------------------------
-      - name: Install dependencies
-        run: |
-          sudo apt update -qq
-          sudo apt install -y \
-            build-essential clang ccache git python3 rsync wget unzip time jq \
-            libncurses-dev libssl-dev zlib1g-dev gawk gettext subversion libelf-dev \
-            xsltproc file curl bc util-linux
-
-      # -------------------------
       # Prepare persistent directories and permissions
       # -------------------------
       - name: Prepare persistent dirs
