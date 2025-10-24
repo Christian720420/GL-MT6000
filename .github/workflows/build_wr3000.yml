@@ -1,48 +1,296 @@
-name: Build OpenWrt WR3000 Firmware
+name: OpenWrt SuperBuild (Matrix + Release + Checksums)
 
 on:
   workflow_dispatch:
+    inputs:
+      devices:
+        description: 'Space separated device slugs (default: "wr3000 mt6000")'
+        required: false
+        default: 'wr3000 mt6000'
   push:
     branches:
       - main
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build:
+    name: Build ${{ matrix.device }} (OpenWrt)
     runs-on: self-hosted
+    timeout-minutes: 720
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [wr3000, mt6000]       # default devices; workflow_dispatch can override
     env:
-      CONFIG_FILE: wr3000.config
+      # --- configurable ---
       OPENWRT_BRANCH: openwrt-24.10
+      CONFIG_FILE: ${{ matrix.device }}.config   # you must provide e.g. wr3000.config, mt6000.config in repo root
+      DEVICE: ${{ matrix.device }}
+      # --- paths on runner (persistent) ---
       CCACHE_DIR: /home/runner/.ccache
-      CCACHE_MAXSIZE: 5G
+      DL_DIR: /home/runner/openwrt_dl
+      FEEDS_DIR: /home/runner/openwrt_feeds
+      LOG_DIR: /home/runner/build_logs
+      WORKDIR: ${{ github.workspace }}/openwrt
+      # --- ccache tuning ---
+      CCACHE_MAXSIZE: 15G
+      CCACHE_COMPRESS: true
+      # --- release ---
+      RELEASE_TAG_PREFIX: nightly
+      # --- other ---
+      TZ: UTC
 
     steps:
-      - name: Checkout Repository
+      # -------------------------
+      # Checkout repo
+      # -------------------------
+      - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Clean old build directories
-        run: |
-          rm -rf openwrt
-          mkdir -p $CCACHE_DIR
-
+      # -------------------------
+      # Install dependencies
+      # -------------------------
       - name: Install dependencies
         run: |
           sudo apt update -qq
-          sudo apt install -y build-essential ccache git python3 unzip wget rsync time libncurses-dev libssl-dev zlib1g-dev
+          sudo apt install -y \
+            build-essential clang ccache git python3 rsync wget unzip time jq \
+            libncurses-dev libssl-dev zlib1g-dev gawk gettext subversion libelf-dev \
+            xsltproc file curl bc util-linux
 
-      - name: Restore ccache cache
+      # -------------------------
+      # Prepare persistent directories and permissions
+      # -------------------------
+      - name: Prepare persistent dirs
+        run: |
+          sudo mkdir -p $CCACHE_DIR $DL_DIR $FEEDS_DIR $LOG_DIR
+          sudo chown -R $(whoami):$(whoami) $CCACHE_DIR $DL_DIR $FEEDS_DIR $LOG_DIR
+          mkdir -p ${{ github.workspace }}/openwrt
+
+      # -------------------------
+      # Restore caches
+      # -------------------------
+      - name: Restore caches (ccache, dl, feeds)
         uses: actions/cache@v4
         with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ github.run_id }}
+          path: |
+            ${{ env.CCACHE_DIR }}
+            ${{ env.DL_DIR }}
+            ${{ env.FEEDS_DIR }}
+          # key uses the contents of any config files named like <device>.config to invalidate caches when configs change
+          key: openwrt-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('**/${{ matrix.device }}.config') }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-
-            ccache-${{ runner.os }}-
-            ccache-
+            openwrt-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-
+            openwrt-${{ env.OPENWRT_BRANCH }}-
+            openwrt-
 
-      - name: Clone OpenWrt & update feeds
+      # -------------------------
+      # Clone OpenWrt and wire persistent caches
+      # -------------------------
+      - name: Clone OpenWrt & link persistent caches
         run: |
           set -eux
+          rm -rf openwrt || true
           git clone https://github.com/openwrt/openwrt.git -b $OPENWRT_BRANCH openwrt
+          cd openwrt
+          # link persistent dl and feeds storage for speed
+          rm -rf dl feeds || true
+          ln -sfn $DL_DIR dl
+          ln -sfn $FEEDS_DIR feeds
+          echo "Linked dl -> $DL_DIR and feeds -> $FEEDS_DIR"
+
+      # -------------------------
+      # Update and install feeds
+      # -------------------------
+      - name: Update & install feeds
+        run: |
+          set -eux
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      # -------------------------
+      # Copy config & sanity-check
+      # -------------------------
+      - name: Copy device config & sanity check
+        run: |
+          set -eux
+          if [ ! -f "${{ github.workspace }}/${{ matrix.device }}.config" ]; then
+            echo "ERROR: Config file '${{ matrix.device }}.config' not found in repo root."
+            ls -la "${{ github.workspace }}"
+            exit 2
+          fi
+          cp "${{ github.workspace }}/${{ matrix.device }}.config" openwrt/.config
+          cd openwrt
+          # run defconfig and show any warnings/info
+          make defconfig
+          # quick scan for obviously invalid entries
+          grep -E "attempt to assign nonexistent|nonexistent symbol|unknown option" -n .config || true
+
+      # -------------------------
+      # Pre-download sources
+      # -------------------------
+      - name: Pre-download all sources
+        run: |
+          set -eux
+          cd openwrt
+          # try parallel download, fallback to single thread on failure (some hosts are flaky)
+          make download -j$(nproc) V=s || make download -j1 V=s
+
+      # -------------------------
+      # System sanity checks (disk/ram)
+      # -------------------------
+      - name: System resource check
+        run: |
+          echo "Disk free (root):"
+          df -h .
+          echo "Disk free (home):"
+          df -h /home || true
+          echo "Memory:"
+          free -h
+          echo "CPU cores:"
+          nproc
+          # abort if disk < 10G free (safety)
+          FREE_KB=$(df --output=avail . | tail -n1)
+          if [ "$FREE_KB" -lt $((10 * 1024 * 1024)) ]; then
+            echo "ERROR: Less than 10GB available on build partition. Aborting."
+            exit 5
+          fi
+
+      # -------------------------
+      # Build (with ccache), verbose + fallback
+      # -------------------------
+      - name: Build (ccache, verbose)
+        run: |
+          set -eux
+          cd openwrt
+          export CCACHE_DIR=$CCACHE_DIR
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_MAXSIZE=$CCACHE_MAXSIZE
+          export CCACHE_COMPRESS=$CCACHE_COMPRESS
+          ccache -z
+          echo "CCACHE: $(which ccache) ; dir: $CCACHE_DIR"
+          echo "Starting make - parallel..."
+          # attempt parallel build; on failure retry single-threaded to capture unclear race conditions
+          if make -j$(nproc) V=s 2>&1 | tee $LOG_DIR/build_${DEVICE}_parallel.log; then
+            echo "Parallel build succeeded"
+          else
+            echo "Parallel build failed — retrying single-threaded to get clearer errors"
+            if make -j1 V=s 2>&1 | tee $LOG_DIR/build_${DEVICE}_single.log; then
+              echo "Single-threaded build succeeded"
+            else
+              echo "Single-threaded build also failed. See logs."
+              exit 10
+            fi
+          fi
+          ccache -s || true
+
+      # -------------------------
+      # Gather artifacts, checksums, and create release
+      # -------------------------
+      - name: Gather artifacts + create checksums
+        run: |
+          set -eux
+          cd openwrt
+          ART_DIR="${{ github.workspace }}/artifacts/${DEVICE}"
+          mkdir -p "$ART_DIR"
+          # find firmware images - typical sysupgrade and factory names
+          find bin/targets -type f \( -name '*sysupgrade*.bin' -o -name '*factory*.bin' -o -name '*.img' -o -name '*.tar' \) -print0 | xargs -0 -I{} cp -v {} "$ART_DIR" || true
+          # also collect checksums and build metadata
+          cd "$ART_DIR"
+          if [ "$(ls -A . || true)" = "" ]; then
+            echo "WARNING: No firmware artifacts found for device $DEVICE"
+          fi
+          sha256sum * > SHA256SUMS || true
+          echo "Build metadata:" > build-info.txt
+          echo "Device: $DEVICE" >> build-info.txt
+          echo "OpenWrt branch: $OPENWRT_BRANCH" >> build-info.txt
+          echo "Build time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> build-info.txt
+          echo "Git ref: $(git -C ${{ github.workspace }} rev-parse --short HEAD)" >> build-info.txt
+          ls -lh >> build-info.txt || true
+          # compress artifacts for upload to actions/upload-artifact and release assets
+          tar -C "$ART_DIR" -czf "${{ github.workspace }}/$DEVICE-artifacts.tar.gz" -C "$ART_DIR" .
+
+      - name: Upload artifact bundle (job artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.device }}-artifacts
+          path: ${{ github.workspace }}/${{ matrix.device }}-artifacts.tar.gz
+
+      # -------------------------
+      # Create GitHub Release & attach assets
+      # -------------------------
+      - name: Create release (draft) for ${{ matrix.device }}
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.RELEASE_TAG_PREFIX }}-${{ matrix.device }}-${{ github.run_number }}-$(date +'%Y%m%d')
+          release_name: OpenWrt - ${{ matrix.device }} - ${{ github.run_number }}
+          body: |
+            Automated OpenWrt build for ${{ matrix.device }}.
+            Branch: ${{ env.OPENWRT_BRANCH }}
+            Workflow run: ${{ github.run_number }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ github.workspace }}/${{ matrix.device }}-artifacts.tar.gz
+          asset_name: ${{ matrix.device }}-artifacts.tar.gz
+          asset_content_type: application/gzip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------
+      # Upload raw firmware files as separate release assets & attach checksum text
+      # -------------------------
+      - name: Upload individual firmware files to release (if present)
+        if: always()
+        run: |
+          set -eux
+          ART_DIR="${{ github.workspace }}/artifacts/${DEVICE}"
+          if [ ! -d "$ART_DIR" ]; then
+            echo "No ART_DIR found - skipping individual upload"
+            exit 0
+          fi
+          # iterate files and upload via the GH REST API
+          for f in "$ART_DIR"/*; do
+            [ -f "$f" ] || continue
+            FILENAME=$(basename "$f")
+            # use curl to upload to release (actions/upload-release-asset@v1 already added a tar.gz; we'll attach individual files too)
+            UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}?name=${FILENAME}"
+            echo "Uploading $FILENAME"
+            curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$f" "$UPLOAD_URL"
+          done
+
+      # -------------------------
+      # Final summary and optional notifications
+      # -------------------------
+      - name: Build summary
+        run: |
+          echo "Build job for $DEVICE completed. Artifacts (tar.gz) uploaded to release."
+          echo "Artifact: ${{ matrix.device }}-artifacts.tar.gz"
+
+      - name: Notify (optional - Telegram)
+        if: false
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          STATUS="${{ job.status }}"
+          MESSAGE="OpenWrt build (${DEVICE}) finished with status: ${STATUS}\nRepo: ${{ github.repository }}\nRun: ${{ github.run_number }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id=${TELEGRAM_CHAT_ID} \
+            -d text="$MESSAGE"
+
