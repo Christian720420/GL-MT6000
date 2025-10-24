@@ -17,14 +17,8 @@ jobs:
     steps:
       - name: Build firmware (using ccache)
   run: |
-    cd openwrt
-    export CCACHE_DIR=$CCACHE_DIR
-    export PATH="/usr/lib/ccache:$PATH"
-    ccache -z
-    make -j$(nproc) V=s
-    ccache -s
-
-      - name: Checkout Repository
+    
+          - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Clean old build directories
@@ -38,6 +32,13 @@ jobs:
           sudo apt update
           sudo apt install -y build-essential ccache git python3 unzip wget rsync time
 
+      cd openwrt
+    export CCACHE_DIR=$CCACHE_DIR
+    export PATH="/usr/lib/ccache:$PATH"
+    ccache -z
+    make -j$(nproc) V=s
+    ccache -s
+    
       - name: Clone OpenWrt & update feeds
         run: |
           set -eux
@@ -45,6 +46,7 @@ jobs:
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          
 
       - name: Copy custom configuration
         run: |
