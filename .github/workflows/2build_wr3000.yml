@@ -26,11 +26,9 @@ jobs:
       CONFIG_FILE: "wr3000.config"
 
     steps:
-      # 0️⃣ Checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1️⃣ Cache Downloads
       - name: Cache Downloads
         uses: actions/cache@v4
         with:
@@ -38,7 +36,6 @@ jobs:
           key: dl-${{ runner.os }}-${{ hashFiles(env.CONFIG_FILE) }}
           restore-keys: dl-${{ runner.os }}-
 
-      # 2️⃣ Cache CCACHE
       - name: Cache CCACHE
         uses: actions/cache@v4
         with:
@@ -46,7 +43,6 @@ jobs:
           key: ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}
           restore-keys: ccache-${{ runner.os }}-${{ matrix.device }}-
 
-      # 3️⃣ Install Dependencies
       - name: Install Dependencies
         run: |
           sudo apt update
@@ -55,7 +51,6 @@ jobs:
             autoconf automake pkg-config git curl wget ccache rsync gawk unzip time \
             python3-setuptools quilt diffstat ed gettext subversion mold
 
-      # 4️⃣ Setup ccache
       - name: Setup ccache
         run: |
           mkdir -p "$CCACHE_DIR"
@@ -65,13 +60,11 @@ jobs:
           ccache -z
         shell: bash
 
-      # 5️⃣ Clean workspace
       - name: Clean Old Build
         run: |
           rm -rf openwrt
           mkdir -p "$DL_DIR"
 
-      # 6️⃣ Configure Git for Clone
       - name: Configure Git
         run: |
           git config --global http.postBuffer 1048576000  # 1 GB buffer for large transfers
@@ -79,7 +72,6 @@ jobs:
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
 
-      # 7️⃣ Clone Official OpenWrt source with retry
       - name: Clone OpenWrt Base
         run: |
           for i in {1..5}; do
@@ -90,12 +82,10 @@ jobs:
             }
           done
 
-      # 8️⃣ Clone GL-MT6000 for custom files
       - name: Clone GL-MT6000 Customs
         run: |
           git clone --depth 1 "$GL_MT6000_REPO" gl-mt6000
 
-      # 9️⃣ Apply Custom Files from GL-MT6000
       - name: Apply Custom Files
         run: |
           cd openwrt
@@ -107,8 +97,7 @@ jobs:
             echo "GL-MT6000 config available for reference; ensure wr3000.config includes desired packages (e.g., luci-app-pbr, adblock)"
           fi
 
-      # 🔟 Update feeds with retry
-      - name: Update & Install Feeds
+      - name: Update and Install Feeds
         run: |
           cd openwrt
           git config --global http.postBuffer 1048576000
@@ -120,20 +109,17 @@ jobs:
           done
           ./scripts/feeds install -a
 
-      # 1️⃣1️⃣ Apply WR3000 custom configuration
       - name: Apply Custom Config
         run: |
           cp "$CONFIG_FILE" openwrt/.config
           cd openwrt
           make defconfig
 
-      # 1️⃣2️⃣ Pre-download all sources
       - name: Download Sources
         run: |
           cd openwrt
           make download -j"$(nproc)" V=s || make download -j1 V=s
 
-      # 1️⃣3️⃣ Build Firmware
       - name: Build Firmware
         run: |
           cd openwrt
@@ -142,27 +128,23 @@ jobs:
           export LD=mold
           make -j"$(nproc)" V=s || make -j1 V=s
 
-      # 1️⃣4️⃣ Strip and compress images
       - name: Optimize Binaries
         run: |
           cd openwrt/bin/targets/*/*
           find . -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; || true
           gzip -9 *sysupgrade*.bin || true
 
-      # 1️⃣5️⃣ Generate SHA256 checksums
       - name: Generate Checksums
         run: |
           cd openwrt/bin/targets/*/*
           sha256sum *sysupgrade*.bin.gz > SHA256SUMS.txt
 
-      # 1️⃣6️⃣ Upload build artifacts
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-${{ matrix.device }}-custom
           path: openwrt/bin/targets/*/*
 
-      # 1️⃣7️⃣ Create GitHub Release
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -176,16 +158,14 @@ jobs:
             --notes "Adapted from GL-MT6000 customs: SSH hardening, UCI QoL, WireGuard/PBR/AdBlock/QoS. Built with ccache and optimizations." \
             *sysupgrade*.bin.gz SHA256SUMS.txt
 
-      # 1️⃣8️⃣ Build summary
       - name: Build Summary
         run: |
           cd openwrt/bin/targets/*/*
           IMAGE_SIZE=$(du -h *sysupgrade*.bin.gz | cut -f1)
-          echo "### ✅ Custom Build Summary for $DEVICE" >> $GITHUB_STEP_SUMMARY
+          echo "### Custom Build Summary for $DEVICE" >> $GITHUB_STEP_SUMMARY
           echo "- Image size: $IMAGE_SIZE" >> $GITHUB_STEP_SUMMARY
           echo "- CCACHE Stats:" >> $GITHUB_STEP_SUMMARY
           ccache -s >> $GITHUB_STEP_SUMMARY
           echo "- Base Repo: Official OpenWrt + GL-MT6000 customs" >> $GITHUB_STEP_SUMMARY
           echo "- OpenWrt Branch: $OPENWRT_BRANCH" >> $GITHUB_STEP_SUMMARY
           echo "- Config File: $CONFIG_FILE (WR3000 params + customs)" >> $GITHUB_STEP_SUMMARY
-```<grok-card data-id="901d05" data-type="citation_card"></grok-card><grok-card data-id="93d541" data-type="citation_card"></grok-card><grok-card data-id="b189ca" data-type="citation_card"></grok-card><grok-card data-id="bd449a" data-type="citation_card"></grok-card><grok-card data-id="35939a" data-type="citation_card"></grok-card>
