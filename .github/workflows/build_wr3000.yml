@@ -13,32 +13,32 @@ jobs:
       CONFIG_FILE: wr3000.config
       OPENWRT_BRANCH: openwrt-24.10
       CCACHE_DIR: /home/runner/.ccache
+      CCACHE_MAXSIZE: 5G
 
     steps:
-      - name: Build firmware (using ccache)
-  run: |
-    
-          - name: Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Clean old build directories
         run: |
           rm -rf openwrt
-          rm -rf $CCACHE_DIR || true
           mkdir -p $CCACHE_DIR
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential ccache git python3 unzip wget rsync time
+          sudo apt update -qq
+          sudo apt install -y build-essential ccache git python3 unzip wget rsync time libncurses-dev libssl-dev zlib1g-dev
 
-      cd openwrt
-    export CCACHE_DIR=$CCACHE_DIR
-    export PATH="/usr/lib/ccache:$PATH"
-    ccache -z
-    make -j$(nproc) V=s
-    ccache -s
-    
+      - name: Restore ccache cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-
+            ccache-${{ runner.os }}-
+            ccache-
+
       - name: Clone OpenWrt & update feeds
         run: |
           set -eux
@@ -46,26 +46,3 @@ jobs:
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-
-      - name: Copy custom configuration
-        run: |
-          cp $CONFIG_FILE openwrt/.config
-          cd openwrt
-          make defconfig
-
-      - name: Build firmware
-        run: |
-          cd openwrt
-          make -j$(nproc) || make -j1 V=s
-
-      - name: Show build size
-        run: |
-          cd openwrt
-          ls -lh bin/targets/*/*/
-
-      - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-wr3000-firmware
-          path: openwrt/bin/targets/
