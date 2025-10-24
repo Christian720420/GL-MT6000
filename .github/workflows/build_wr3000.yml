@@ -30,11 +30,14 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1️⃣ Ensure non-interactive apt & pre-sudo permissions
-      - name: Configure Sudo (Optional)
-        run: |
-          echo "%sudo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/runner || true
-          sudo apt update -y
+      - name: Install Packages with sudo
+  env:
+    SUDO_PASS: ${{ secrets.SUDO_PASSWORD }}
+  run: |
+    echo "$SUDO_PASS" | sudo -S -v
+    sudo apt update -y
+    sudo apt install -y build-essential git ccache
+
 
       # 2️⃣ Install dependencies
       - name: Install Build Dependencies
