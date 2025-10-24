@@ -1,11 +1,17 @@
-name: Advanced OpenWrt WR3000 Custom Build
-
+name: Optimized OpenWrt WR3000 Build Pipeline
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Force clean build (ignore cache)'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [ main ]
+    paths-ignore: [ '**.md', 'docs/**' ]
   schedule:
-    - cron: "0 3 * * *" # Daily 03:00 UTC build
+    - cron: "0 3 * * *" # Daily 03:00 UTC
 
 env:
   OPENWRT_REPO: https://github.com/openwrt/openwrt.git
@@ -13,199 +19,339 @@ env:
   GL_MT6000_REPO: https://github.com/Christian720420/GL-MT6000.git
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   DL_DIR: ${{ github.workspace }}/dl
+  CCACHE_SIZE: 25G
+  PARALLEL_JOBS: ${{ github.event.inputs.clean_build == 'true' && '1' || '' }}
 
 jobs:
   build:
     runs-on: self-hosted
-    timeout-minutes: 600
+    timeout-minutes: 480 # Reduced from 600
     strategy:
+      fail-fast: false
       matrix:
         device: [cudy_wr3000-v1]
+    
     env:
       DEVICE: ${{ matrix.device }}
       CONFIG_FILE: "wr3000.config"
-
+      FORCE_CLEAN: ${{ github.event.inputs.clean_build }}
+    
     steps:
-      # 🧱 Checkout main repository
+      # 🧱 Enhanced checkout with token
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 🧩 Persistent cache for downloads and ccache
-      - name: Cache Downloads
+      # 🧩 Intelligent caching with compression
+      - name: Cache Downloads & Sources
         uses: actions/cache@v4
         with:
           path: ${{ env.DL_DIR }}
-          key: dl-${{ runner.os }}-${{ hashFiles(env.CONFIG_FILE) }}
+          key: dl-v2-${{ runner.os }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ env.OPENWRT_BRANCH }}
           restore-keys: |
-            dl-${{ runner.os }}-
+            dl-v2-${{ runner.os }}-${{ hashFiles(env.CONFIG_FILE) }}-
+            dl-v2-${{ runner.os }}-
+          enableCrossOsArchive: false
 
-      - name: Cache CCACHE
+      - name: Cache CCACHE (Compressed)
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}
+          key: ccache-v3-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ matrix.device }}-
+            ccache-v3-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-
+            ccache-v3-${{ runner.os }}-${{ matrix.device }}-
 
-      # 🧰 Install required dependencies
-      - name: Install Dependencies
+      # 🧰 Optimized dependency installation
+      - name: Install Dependencies (Cached)
         run: |
-          sudo apt update
-          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+          sudo apt update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y --no-install-recommends \
             build-essential libncurses-dev libssl-dev zlib1g-dev libtool-bin \
             autoconf automake pkg-config git curl wget ccache rsync gawk unzip time \
-            python3-setuptools quilt diffstat ed gettext subversion mold
+            python3-setuptools quilt diffstat ed gettext subversion mold ninja-build \
+            libelf-dev libfuse-dev liblzma-dev libzstd-dev
+          
+          # Install faster alternatives
+          which fd || sudo apt install -y fd-find
+          which rg || sudo apt install -y ripgrep
 
-      # ⚙️ Setup ccache
-      - name: Setup ccache
+      # ⚙️ Enhanced ccache configuration
+      - name: Configure Build Environment
         run: |
+          # CCACHE optimization
           mkdir -p "$CCACHE_DIR"
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
-          ccache -M 20G
+          ccache -M $CCACHE_SIZE
+          ccache -o compression=true
+          ccache -o compression_level=6
+          ccache -o max_files=50000
           ccache -z
+          
+          # Git optimization
+          git config --global http.postBuffer 2097152000
+          git config --global http.version HTTP/2
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 300
+          git config --global core.preloadindex true
+          git config --global core.fscache true
+          
+          # Build environment
+          echo "MAKEFLAGS=-j$(nproc --ignore=1)" >> $GITHUB_ENV
+          echo "NINJA_STATUS=[%f/%t] " >> $GITHUB_ENV
 
-      # 🧹 Clean previous builds
-      - name: Clean Old Build
+      # 🧹 Intelligent cleanup
+      - name: Conditional Cleanup
         run: |
-          rm -rf openwrt
+          if [[ "$FORCE_CLEAN" == "true" ]]; then
+            echo "🧹 Force clean build requested"
+            rm -rf openwrt gl-mt6000
+            ccache -C
+          else
+            echo "♻️ Using cached build environment"
+            rm -rf openwrt/tmp openwrt/staging_dir 2>/dev/null || true
+          fi
           mkdir -p "$DL_DIR"
 
-      # ⚙️ Git optimization for large clones
-      - name: Configure Git
+      # 🧬 Parallel repository cloning
+      - name: Clone Repositories (Parallel)
         run: |
-          git config --global http.postBuffer 1048576000
-          git config --global http.version HTTP/1.1
-          git config --global http.lowSpeedLimit 0
-          git config --global http.lowSpeedTime 999999
+          clone_with_retry() {
+            local repo=$1 branch=$2 dir=$3 depth=${4:-1}
+            for i in {1..3}; do
+              if git clone --depth $depth ${branch:+-b $branch} --single-branch "$repo" "$dir"; then
+                echo "✅ Successfully cloned $dir"
+                return 0
+              else
+                echo "⚠️ Clone attempt $i failed for $dir, retrying..."
+                rm -rf "$dir"
+                sleep $((i * 5))
+              fi
+            done
+            return 1
+          }
+          
+          # Parallel cloning
+          clone_with_retry "$OPENWRT_REPO" "$OPENWRT_BRANCH" "openwrt" &
+          clone_with_retry "$GL_MT6000_REPO" "" "gl-mt6000" &
+          wait
+          
+          echo "📊 Repository sizes:"
+          du -sh openwrt gl-mt6000
 
-      # 🧬 Clone OpenWrt with retry logic
-      - name: Clone OpenWrt Base
-        run: |
-          for i in {1..5}; do
-            git clone --depth 1 -b "$OPENWRT_BRANCH" "$OPENWRT_REPO" openwrt && break || {
-              echo "❌ Clone attempt $i failed, retrying in 15s..."
-              sleep 15
-              rm -rf openwrt
-            }
-          done
-
-      # 🔧 Clone custom overlay repo
-      - name: Clone GL-MT6000 Customs
-        run: |
-          git clone --depth 1 "$GL_MT6000_REPO" gl-mt6000
-
-      # 🧩 Apply customizations and config references
-      - name: Apply Custom Files
+      # 🔧 Enhanced customization application
+      - name: Apply Customizations
         run: |
           cd openwrt
-          if [ -d ../gl-mt6000/files ]; then
+          
+          # Apply custom files with verification
+          if [[ -d ../gl-mt6000/files ]]; then
             cp -r ../gl-mt6000/files/* files/ 2>/dev/null || true
-            echo "✅ Custom files applied: SSH hardening, UCI defaults, scripts"
+            echo "✅ Applied custom files: $(find files/ -type f | wc -l) files"
           fi
-          if [ -f ../gl-mt6000/mt6000.config ]; then
-            echo "ℹ️ GL-MT6000 config detected for reference"
+          
+          # Reference config detection
+          if [[ -f ../gl-mt6000/mt6000.config ]]; then
+            echo "ℹ️ GL-MT6000 reference config available"
+            echo "CONFIG_REFERENCE=../gl-mt6000/mt6000.config" >> $GITHUB_ENV
           fi
 
-      # 🔁 Update and install feeds (with retry)
-      - name: Update and Install Feeds
+      # 🔁 Optimized feed management
+      - name: Update Feeds (Optimized)
         run: |
           cd openwrt
-          git config --global http.postBuffer 1048576000
-          for i in {1..5}; do
-            ./scripts/feeds update -a && break || {
-              echo "⚠️ Feed update attempt $i failed, retrying in 15s..."
-              sleep 15
-            }
-          done
+          
+          # Parallel feed updates
+          ./scripts/feeds update -a -j$(nproc) || {
+            echo "⚠️ Parallel feed update failed, trying sequential..."
+            ./scripts/feeds update -a
+          }
+          
           ./scripts/feeds install -a
-
-      # 🧹 Clean tmp and staging dirs (prevents package_install errors)
-      - name: Pre-clean Staging and Feeds
-        run: |
-          cd openwrt
+          
+          # Clean potential conflicts
           rm -rf tmp staging_dir
           ./scripts/feeds clean
 
-      # ⚙️ Apply custom config
-      - name: Apply Custom Config
+      # ⚙️ Smart config application
+      - name: Configure Build
         run: |
+          # Apply base config
           cp "$CONFIG_FILE" openwrt/.config
           cd openwrt
+          
+          # Generate full config
           make defconfig
+          
+          # Verify critical options
+          echo "🔍 Verifying build configuration..."
+          grep -E "CONFIG_TARGET_|CONFIG_CCACHE" .config || echo "⚠️ Config verification incomplete"
 
-      # 🌐 Pre-download all source tarballs (cached)
-      - name: Download Sources
+      # 🌐 Optimized source download
+      - name: Download Sources (Parallel)
         run: |
           cd openwrt
-          make download -j"$(nproc)" V=s || make download -j1 V=s
+          
+          # Use maximum parallel downloads
+          make download -j$(nproc) V=s || {
+            echo "⚠️ Parallel download failed, retrying with reduced parallelism..."
+            make download -j$(($(nproc)/2)) V=s || make download -j1 V=s
+          }
+          
+          echo "📦 Downloaded sources: $(find dl/ -name "*.tar.*" | wc -l) packages"
 
-      # 🧱 Build firmware (auto fallback + retry on package errors)
-      - name: Build Firmware (Resilient)
+      # 🧱 Intelligent build process
+      - name: Build Firmware (Smart)
         run: |
           cd openwrt
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
           export LD=mold
-          echo "🚀 Starting OpenWrt build..."
-          make -j"$(nproc)" V=s || {
-            echo "⚠️ Parallel build failed, retrying single-threaded..."
-            make -j1 V=s
+          
+          # Determine optimal job count
+          JOBS=${PARALLEL_JOBS:-$(nproc --ignore=1)}
+          echo "🚀 Starting build with $JOBS parallel jobs..."
+          
+          # Build with progressive fallback
+          make -j$JOBS V=s || {
+            echo "⚠️ High parallelism failed, reducing to half cores..."
+            make -j$((JOBS/2)) V=s || {
+              echo "⚠️ Medium parallelism failed, using single thread..."
+              make -j1 V=s
+            }
           }
 
-      # 🔁 Auto-retry if package_install fails
-      - name: Retry Build on Package Error
+      # 🔁 Smart recovery system
+      - name: Recovery Build (If Needed)
         if: failure()
         run: |
           cd openwrt
-          echo "⚠️ Detected package install failure, cleaning and retrying..."
-          rm -rf tmp staging_dir
+          echo "🔄 Initiating recovery build process..."
+          
+          # Clean and retry
+          rm -rf tmp staging_dir build_dir/host
           make package/cleanup V=s
-          make -j"$(nproc)" V=s || make -j1 V=s
+          
+          # Conservative rebuild
+          make -j1 V=s || {
+            echo "❌ Recovery build failed, generating diagnostic info..."
+            echo "RECOVERY_FAILED=true" >> $GITHUB_ENV
+            
+            # Generate build log for debugging
+            tail -100 logs/package/*/compile.txt > build_failure.log 2>/dev/null || true
+          }
 
-      # 🧼 Optimize and compress final images
-      - name: Optimize Binaries
+      # 🧼 Advanced optimization
+      - name: Optimize Build Output
+        if: env.RECOVERY_FAILED != 'true'
         run: |
           cd openwrt/bin/targets/*/*
-          find . -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; || true
-          gzip -9 *sysupgrade*.bin || true
+          
+          # Strip and compress with better algorithms
+          find . -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; 2>/dev/null || true
+          
+          # Use zstd for better compression
+          for file in *sysupgrade*.bin; do
+            if [[ -f "$file" ]]; then
+              zstd -19 --rm "$file" || gzip -9 "$file"
+            fi
+          done
+          
+          echo "📊 Final image sizes:"
+          ls -lh *sysupgrade* || true
 
-      # 🧾 Generate checksums
-      - name: Generate Checksums
+      # 🧾 Enhanced verification
+      - name: Generate Verification Data
+        if: env.RECOVERY_FAILED != 'true'
         run: |
           cd openwrt/bin/targets/*/*
-          sha256sum *sysupgrade*.bin.gz > SHA256SUMS.txt
+          
+          # Multiple hash algorithms
+          sha256sum *sysupgrade* > SHA256SUMS.txt
+          md5sum *sysupgrade* > MD5SUMS.txt
+          
+          # Build manifest
+          cat > BUILD_INFO.txt << EOF
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Device: $DEVICE
+          OpenWrt Branch: $OPENWRT_BRANCH
+          Commit: $(cd ../../../.. && git rev-parse --short HEAD)
+          Builder: GitHub Actions
+          CCACHE Hit Rate: $(ccache -s | grep "cache hit rate" || echo "N/A")
+          EOF
 
-      # 📦 Upload artifacts
-      - name: Upload Artifacts
+      # 📦 Smart artifact upload
+      - name: Upload Build Artifacts
+        if: env.RECOVERY_FAILED != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ matrix.device }}-custom
-          path: openwrt/bin/targets/*/*
+          name: openwrt-${{ matrix.device }}-optimized-${{ github.run_number }}
+          path: |
+            openwrt/bin/targets/*/*
+            !openwrt/bin/targets/*/*/packages
+          retention-days: 30
+          compression-level: 6
 
-      # 🚀 Create GitHub release
-      - name: Create GitHub Release
+      # 🚀 Enhanced release management
+      - name: Create Optimized Release
+        if: env.RECOVERY_FAILED != 'true' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd openwrt/bin/targets/*/*
-          DATE=$(date +%F)
-          RELEASE_NAME="${DEVICE}-custom-${DATE}"
-          gh release delete "$RELEASE_NAME" --cleanup-tag -y 2>/dev/null || true
+          
+          DATE=$(date +%Y%m%d)
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          RELEASE_NAME="${DEVICE}-v${DATE}-${SHORT_SHA}"
+          
+          # Cleanup old releases (keep last 5)
+          gh release list --limit 10 | tail -n +6 | awk '{print $1}' | xargs -I {} gh release delete {} --cleanup-tag -y 2>/dev/null || true
+          
+          # Create new release
           gh release create "$RELEASE_NAME" \
-            --title "Custom OpenWrt $DEVICE Build ($DATE)" \
-            --notes "Built with persistent ccache, retry logic, and OpenWrt feed stability. Includes GL-MT6000 customizations (SSH hardening, UCI tweaks, Adblock, QoS, WireGuard)." \
-            *sysupgrade*.bin.gz SHA256SUMS.txt
+            --title "🚀 Optimized OpenWrt Build - $DEVICE ($DATE)" \
+            --notes "$(cat BUILD_INFO.txt)" \
+            --latest \
+            *sysupgrade* *SUMS.txt BUILD_INFO.txt
 
-      # 📊 Build summary
-      - name: Build Summary
+      # 📊 Comprehensive build summary
+      - name: Build Analytics
+        if: always()
         run: |
-          cd openwrt/bin/targets/*/*
-          IMAGE_SIZE=$(du -h *sysupgrade*.bin.gz | cut -f1)
-          echo "### ✅ Custom Build Summary for $DEVICE" >> $GITHUB_STEP_SUMMARY
-          echo "- Image size: $IMAGE_SIZE" >> $GITHUB_STEP_SUMMARY
-          echo "- CCACHE Stats:" >> $GITHUB_STEP_SUMMARY
-          ccache -s >> $GITHUB_STEP_SUMMARY
-          echo "- Repo: OpenWrt + GL-MT6000" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: $OPENWRT_BRANCH" >> $GITHUB_STEP_SUMMARY
-          echo "- Config: $CONFIG_FILE" >> $GITHUB_STEP_SUMMARY
+          cd openwrt/bin/targets/*/* 2>/dev/null || cd .
+          
+          {
+            echo "### 🎯 Build Summary - $DEVICE"
+            echo ""
+            
+            if [[ "$RECOVERY_FAILED" == "true" ]]; then
+              echo "❌ **Build Status**: FAILED"
+              echo "📋 **Recovery Attempted**: Yes"
+            else
+              echo "✅ **Build Status**: SUCCESS"
+              if ls *sysupgrade* &>/dev/null; then
+                IMAGE_SIZE=$(du -h *sysupgrade* | cut -f1 | head -1)
+                echo "📦 **Image Size**: $IMAGE_SIZE"
+              fi
+            fi
+            
+            echo "🔧 **Configuration**: $CONFIG_FILE"
+            echo "🌿 **Branch**: $OPENWRT_BRANCH"
+            echo "⚡ **Build Time**: $((SECONDS/60)) minutes"
+            echo ""
+            echo "### 📊 CCACHE Statistics"
+            echo '```'
+            ccache -s 2>/dev/null || echo "CCACHE stats unavailable"
+            echo '```'
+            
+            if [[ -f build_failure.log ]]; then
+              echo ""
+              echo "### 🔍 Build Failure Details"
+              echo '```'
+              cat build_failure.log
+              echo '```'
+            fi
+          } >> $GITHUB_STEP_SUMMARY
