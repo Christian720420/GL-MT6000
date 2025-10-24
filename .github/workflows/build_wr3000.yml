@@ -30,14 +30,14 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 1️⃣ Authenticate sudo & basic install
       - name: Install Packages with sudo
-  env:
-    SUDO_PASS: ${{ secrets.SUDO_PASSWORD }}
-  run: |
-    echo "$SUDO_PASS" | sudo -S -v
-    sudo apt update -y
-    sudo apt install -y build-essential git ccache
-
+        env:
+          SUDO_PASS: ${{ secrets.SUDO_PASSWORD }}
+        run: |
+          echo "$SUDO_PASS" | sudo -S -v
+          sudo apt update -y
+          sudo apt install -y build-essential git ccache
 
       # 2️⃣ Install dependencies
       - name: Install Build Dependencies
