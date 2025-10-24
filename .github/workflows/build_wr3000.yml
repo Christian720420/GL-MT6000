@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 600
     strategy:
       matrix:
-        device: [cudy_wr3000-v1, cudy_wr3000-v2]
+        device: [cudy_wr3000-v1]
     env:
       DEVICE: ${{ matrix.device }}
       CONFIG_FILE: "wr3000.config"
