@@ -139,11 +139,49 @@ jobs:
               sleep 30
             }
           done
+
+      - name: Verify Build Success
+        run: |
+          ARTDIR="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
+          echo "Checking for sysupgrade images in $ARTDIR"
+          if [ -d "$ARTDIR" ] && ls "$ARTDIR"/*sysupgrade*.bin > /dev/null 2>&1; then
+            echo "Build artifacts found in $ARTDIR"
+            ls -lh "$ARTDIR" || true
+          else
+            echo "ERROR: No sysupgrade images found in $ARTDIR"
+            echo "Listing openwrt/bin/targets for debugging:" 
+            ls -la openwrt/bin/targets || true
+            echo "Top-level openwrt directory listing:" 
+            ls -la openwrt || true
+            echo "Tail of possible build log (if present):" 
+            [ -f openwrt/build.log ] && tail -n 200 openwrt/build.log || true
+            # Fail early so remaining steps don't attempt to operate on missing artifacts
+            exit 1
+          fi
+        shell: bash
+
       - name: Optimize Binaries
         run: |
-          cd openwrt/bin/targets/${TARGET}/${SUBTARGET}
-          find . -type f -name "*sysupgrade*.bin" -exec strip --strip-unneeded {} \; || true
-          gzip -9 *sysupgrade*.bin || true
+          ARTDIR="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
+          if [ -d "$ARTDIR" ]; then
+            echo "Optimizing binaries in $ARTDIR"
+            cd "$ARTDIR"
+            # Show files for debugging
+            ls -lh || true
+            # Strip all sysupgrade binaries if present
+            find . -type f -name "*sysupgrade*.bin" -print0 | xargs -0 --no-run-if-empty strip --strip-unneeded || true
+            # Compress only files that exist
+            for f in *sysupgrade*.bin; do
+              if [ -f "$f" ]; then
+                gzip -9 "$f" || true
+              fi
+            done
+          else
+            echo "No artifacts directory $ARTDIR; skipping optimization step"
+            ls -la openwrt/bin/targets || true
+            exit 0
+          fi
+        shell: bash
 
       - name: Generate Checksums
         run: |
