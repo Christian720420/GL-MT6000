@@ -126,19 +126,60 @@ jobs:
           cd openwrt
           make download -j"$(nproc)" V=s || make download -j1 V=s
 
-      - name: Build Firmware
+      - name: Pre-build diagnostics
+        shell: bash
         run: |
+          echo "=== Disk usage ==="
+          df -h || true
+          echo "=== Free memory ==="
+          free -m || true
+          echo "=== Ulimit ==="
+          ulimit -a || true
+          echo "=== Temp dir usage (openwrt/tmp) ==="
+          du -sh openwrt/tmp 2>/dev/null || true
+          echo "=== Top build_dir sizes ==="
+          du -sh openwrt/build_dir/* 2>/dev/null | sort -h | tail -n 50 || true
+          echo "=== Which toolchain/binaries ==="
+          which strip || true
+          which ld || true
+          strip --version 2>/dev/null || true
+          ld --version 2>/dev/null || true
+          echo "=== file descriptors ==="
+          ls -l /proc/$$/fd 2>/dev/null || true
+
+      - name: Build Firmware
+        shell: bash
+        run: |
+          set -o pipefail
           cd openwrt
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
           export LD=mold
+          rm -f build.log
+          SUCCESS=0
           for i in {1..3}; do
-            make -j"$(nproc)" V=s && break || {
-              echo "Build attempt $i failed, retrying..."
-              make clean
+            echo "Starting build attempt $i" | tee -a build.log
+            if make -j"$(nproc)" V=s 2>&1 | tee -a build.log; then
+              echo "Build attempt $i succeeded" | tee -a build.log
+              SUCCESS=1
+              break
+            else
+              echo "Build attempt $i failed, cleaning and retrying..." | tee -a build.log
+              make clean >> build.log 2>&1 || true
               sleep 30
-            }
+            fi
           done
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "All build attempts failed; see openwrt/build.log" | tee -a build.log
+            exit 1
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.device }}
+          path: openwrt/build.log
 
       - name: Verify Build Success
         run: |
