@@ -184,13 +184,14 @@ jobs:
           export CXXFLAGS="$CXXFLAGS -pipe -fno-semantic-interposition -fno-enforce-eh-specs"
           # Fine-tune GCC for cc1plus acceleration
           export GCC_EXTRA_ARGS="-fno-inline-functions-called-once -fno-inline-small-functions -fno-expensive-optimizations -fno-tree-vectorize"
-          # Optimize process scheduling
-          sudo sh -c 'echo -20 > /proc/sys/kernel/sched_migration_cost_ns' || true
-          # Set process niceness for cc1plus
-          echo 'PATH=$PATH:/usr/lib/ccache' | sudo tee -a /etc/environment
-          sudo sysctl -w kernel.sched_autogroup_enabled=0 || true
-          # Configure system memory for compilation
-          sudo sysctl -w vm.swappiness=10 || true
+          # Add ccache to path
+          export PATH="/usr/lib/ccache:$PATH"
+          # Configure ccache
+          ccache --max-size=50G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache --set-config=sloppiness=file_macro,include_file_mtime,time_macros
+          ccache --set-config=compiler_check=content
           
       - name: Pre-build diagnostics
         shell: bash
@@ -245,24 +246,44 @@ jobs:
             exit 1
           fi
 
-      - name: Upload build log
+      - name: Collect build logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p build-logs
+          if [ -f openwrt/build.log ]; then
+            cp openwrt/build.log build-logs/
+          fi
+          if [ -d openwrt/logs ]; then
+            cp -r openwrt/logs/* build-logs/ || true
+          fi
+          
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ matrix.device }}
-          path: openwrt/build.log
+          path: build-logs/
+          if-no-files-found: warn
 
+      - name: Find build artifacts
+        if: always()
+        shell: bash
+        run: |
+          echo "=== Looking for curl build artifacts ==="
+          find openwrt/build_dir -name "curl*" -type d -ls || true
+          find openwrt/staging_dir -name "curl*" -type d -ls || true
+          
       - name: Upload package build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-artifacts-${{ matrix.device }}
           path: |
-            openwrt/build_dir/host*/curl-*
-            openwrt/build_dir/target*/curl-*
-            openwrt/staging_dir/**/curl-*
-            openwrt/logs/curl_*.txt
-            openwrt/logs/package/curl/*.log
+            openwrt/build_dir/**/package/curl/**/*
+            openwrt/staging_dir/**/package/curl/**/*
+            openwrt/logs/**/*curl*.log
+            openwrt/logs/**/*curl*.txt
           if-no-files-found: warn
           compression-level: 6
           retention-days: 5
