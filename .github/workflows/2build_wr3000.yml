@@ -2,6 +2,11 @@ name: Advanced OpenWrt WR3000 Custom Build
 
 on:
   workflow_dispatch:
+    inputs:
+      fast:
+        description: 'Enable fast build mode (lighter config, tmpfs use if available)'
+        required: false
+        default: 'false'
   push:
     branches: [ main ]
   schedule:
@@ -62,7 +67,8 @@ jobs:
           mkdir -p "$CCACHE_DIR"
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
-          ccache -M 20G
+          export CCACHE_COMPRESS=1     # enable compression
+          ccache -M 50G
           ccache -z
         shell: bash
 
@@ -121,11 +127,71 @@ jobs:
           cd openwrt
           make defconfig
 
+      - name: Cache staging_dir & toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: ${{ runner.os }}-staging-${{ matrix.device }}-${{ hashFiles('openwrt/.config') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-staging-${{ matrix.device }}-${{ hashFiles('openwrt/.config') }}-
+            ${{ runner.os }}-staging-${{ matrix.device }}-
+
+      - name: Fast-mode config tweaks
+        if: ${{ github.event.inputs.fast == 'true' }}
+        shell: bash
+        run: |
+          set -e
+          cd openwrt
+          echo "Applying fast-mode tweaks to .config (disabling LTO/GC_SECTIONS and lowering -O3->-O2)"
+          sed -i '/^CONFIG_USE_LTO=/d' .config || true
+          sed -i '/^CONFIG_USE_GC_SECTIONS=/d' .config || true
+          sed -i 's/-O3/-O2/g' .config || true
+          make defconfig
+
       - name: Download Sources
         run: |
           cd openwrt
           make download -j"$(nproc)" V=s || make download -j1 V=s
 
+      - name: Mount tmpfs for openwrt/tmp (fast mode)
+        if: ${{ github.event.inputs.fast == 'true' }}
+        shell: bash
+        run: |
+          # Only attempt on Linux self-hosted runner
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "Not Linux: skip tmpfs"
+            exit 0
+          fi
+          mkdir -p openwrt/tmp
+          MEM=$(free -m | awk '/Mem:/ {print $2}')
+          # size = half RAM, cap 20000 MB
+          SIZE=$(( MEM / 2 ))
+          if [ "$SIZE" -gt 20000 ]; then SIZE=20000; fi
+          echo "Attempting to mount tmpfs ${SIZE}M at openwrt/tmp (requires sudo)"
+          sudo mount -t tmpfs -o size=${SIZE}M tmpfs openwrt/tmp || {
+            echo "mount tmpfs failed or no sudo, continuing without tmpfs"
+          }
+
+      - name: Configure compiler optimizations
+        shell: bash
+        run: |
+          # Set GCC parameters for faster compilation
+          export NPROC=$(nproc)
+          # Enable advanced GCC optimizations for C++
+          export CFLAGS="$CFLAGS -pipe -fno-semantic-interposition"
+          export CXXFLAGS="$CXXFLAGS -pipe -fno-semantic-interposition -fno-enforce-eh-specs"
+          # Fine-tune GCC for cc1plus acceleration
+          export GCC_EXTRA_ARGS="-fno-inline-functions-called-once -fno-inline-small-functions -fno-expensive-optimizations -fno-tree-vectorize"
+          # Optimize process scheduling
+          sudo sh -c 'echo -20 > /proc/sys/kernel/sched_migration_cost_ns' || true
+          # Set process niceness for cc1plus
+          echo 'PATH=$PATH:/usr/lib/ccache' | sudo tee -a /etc/environment
+          sudo sysctl -w kernel.sched_autogroup_enabled=0 || true
+          # Configure system memory for compilation
+          sudo sysctl -w vm.swappiness=10 || true
+          
       - name: Pre-build diagnostics
         shell: bash
         run: |
@@ -155,6 +221,12 @@ jobs:
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
           export LD=mold
+          # Optimize cc1plus memory usage
+          export CCACHE_MAXSIZE=50G
+          export CCACHE_SLOPPINESS=file_macro,include_file_mtime,time_macros
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_COMPRESS=1
+          export CCACHE_NODIRECT=1
           rm -f build.log
           SUCCESS=0
           for i in {1..3}; do
@@ -164,8 +236,7 @@ jobs:
               SUCCESS=1
               break
             else
-              echo "Build attempt $i failed, cleaning and retrying..." | tee -a build.log
-              make clean >> build.log 2>&1 || true
+              echo "Build attempt $i failed, retrying without full clean (preserve state)..." | tee -a build.log
               sleep 30
             fi
           done
@@ -181,14 +252,20 @@ jobs:
           name: build-log-${{ matrix.device }}
           path: openwrt/build.log
 
-      - name: Upload curl package build dir
+      - name: Upload package build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: curl-build-${{ matrix.device }}
+          name: build-artifacts-${{ matrix.device }}
           path: |
-            openwrt/build_dir/**/curl-*
-            openwrt/build_dir/**/curl-*/*
+            openwrt/build_dir/host*/curl-*
+            openwrt/build_dir/target*/curl-*
+            openwrt/staging_dir/**/curl-*
+            openwrt/logs/curl_*.txt
+            openwrt/logs/package/curl/*.log
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 5
 
       - name: Verify Build Success
         run: |
