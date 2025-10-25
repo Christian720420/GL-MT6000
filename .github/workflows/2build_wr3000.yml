@@ -181,6 +181,15 @@ jobs:
           name: build-log-${{ matrix.device }}
           path: openwrt/build.log
 
+      - name: Upload curl package build dir
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: curl-build-${{ matrix.device }}
+          path: |
+            openwrt/build_dir/**/curl-*
+            openwrt/build_dir/**/curl-*/*
+
       - name: Verify Build Success
         run: |
           ARTDIR="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
