@@ -91,18 +91,13 @@ jobs:
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
           
-          # Optimize ccache settings
+          # Basic ccache settings
           ccache -M 50G  # Maximum cache size
           ccache --set-config=compression=true
-          ccache --set-config=compression_level=6  # Better compression
-          ccache --set-config=sloppiness=file_macro,include_file_mtime,time_macros,pch_defines,system_headers
-          ccache --set-config=hash_dir=false  # Faster hashing
-          ccache --set-config=compiler_check=content  # More cache hits
-          ccache --set-config=inode_cache=true  # Faster cache lookups
-          ccache --set-config=keep_comments_cpp=false  # Smaller cache files
-          ccache --set-config=limit_multiple=0.95  # More aggressive cache cleanup
+          ccache --set-config=compression_level=6
+          ccache --set-config=sloppiness=file_macro,include_file_mtime,time_macros
+          ccache --set-config=compiler_check=content
           ccache --set-config=max_size=50G
-          ccache --set-config=recache=true  # Allow cache reuse even with minor changes
           
           # Show settings
           ccache -p
@@ -254,21 +249,19 @@ jobs:
 
       - name: Configure compiler optimizations
         run: |
-          # Set GCC parameters for faster compilation
+          # Set compilation parameters
           export NPROC=$(nproc)
-          # Enable advanced GCC optimizations for C++
-          export CFLAGS="$CFLAGS -pipe -fno-semantic-interposition"
-          export CXXFLAGS="$CXXFLAGS -pipe -fno-semantic-interposition -fno-enforce-eh-specs"
-          # Fine-tune GCC for cc1plus acceleration
-          export GCC_EXTRA_ARGS="-fno-inline-functions-called-once -fno-inline-small-functions -fno-expensive-optimizations -fno-tree-vectorize"
-          # Add ccache to path
+          
+          # Basic compiler optimizations
+          export CFLAGS="-O2 -pipe"
+          export CXXFLAGS="-O2 -pipe"
+          
+          # Use ccache
           export PATH="/usr/lib/ccache:$PATH"
-          # Configure ccache
-          ccache --max-size=50G
-          ccache --set-config=compression=true
-          ccache --set-config=compression_level=6
-          ccache --set-config=sloppiness=file_macro,include_file_mtime,time_macros
-          ccache --set-config=compiler_check=content
+          
+          # Set environment variables for OpenWrt build
+          export BUILD_LOG=1
+          export FORCE_UNSAFE_CONFIGURE=1
           
       - name: Pre-build diagnostics
         run: |
