@@ -23,7 +23,18 @@ jobs:
   build:
     runs-on: self-hosted
     timeout-minutes: 600
+    
+    # Add concurrency to prevent multiple builds from running simultaneously
+    concurrency:
+      group: build-${{ github.workflow }}-${{ matrix.device }}-${{ github.ref }}
+      cancel-in-progress: true
+    
+    defaults:
+      run:
+        shell: bash
+    
     strategy:
+      fail-fast: false  # Continue with other devices if one fails
       matrix:
         device: [cudy_wr3000-v1]
     env:
@@ -62,6 +73,7 @@ jobs:
             ccache-${{ runner.os }}-${{ matrix.device }}-
 
       - name: Install Dependencies
+        shell: bash
         run: |
           sudo apt update
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
@@ -78,10 +90,25 @@ jobs:
           mkdir -p "$CCACHE_DIR"
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
-          export CCACHE_COMPRESS=1     # enable compression
-          ccache -M 50G
+          
+          # Optimize ccache settings
+          ccache -M 50G  # Maximum cache size
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6  # Better compression
+          ccache --set-config=sloppiness=file_macro,include_file_mtime,time_macros,pch_defines,system_headers
+          ccache --set-config=hash_dir=false  # Faster hashing
+          ccache --set-config=compiler_check=content  # More cache hits
+          ccache --set-config=inode_cache=true  # Faster cache lookups
+          ccache --set-config=keep_comments_cpp=false  # Smaller cache files
+          ccache --set-config=limit_multiple=0.95  # More aggressive cache cleanup
+          ccache --set-config=max_size=50G
+          ccache --set-config=recache=true  # Allow cache reuse even with minor changes
+          
+          # Show settings
+          ccache -p
+          
+          # Initialize statistics
           ccache -z
-        shell: bash
 
       - name: Prepare Build Directories
         run: |
@@ -128,7 +155,6 @@ jobs:
       - name: Update and Install Feeds
         run: |
           cd openwrt
-          git config --global http.postBuffer 1048576000
           for i in {1..5}; do
             ./scripts/feeds update -a && break || {
               echo "Feed update attempt $i failed, retrying in 15s..."
@@ -160,19 +186,26 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            openwrt/staging_dir
-            openwrt/build_dir/toolchain-*
-            openwrt/build_dir/host
-            openwrt/tmp
-          key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) }}-${{ hashFiles('feeds.conf.default') }}
+            openwrt/staging_dir/**/*
+            openwrt/build_dir/toolchain-*/**/*
+            openwrt/build_dir/host/**/*
+            !openwrt/staging_dir/**/*.o
+            !openwrt/staging_dir/**/*.d
+            !openwrt/staging_dir/**/*.cmd
+            !openwrt/staging_dir/**/.built
+            !openwrt/staging_dir/**/.staged
+            !openwrt/staging_dir/**/.configured*
+            !openwrt/staging_dir/**/files-*
+            !openwrt/staging_dir/**/stamps
+          key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('feeds.conf.default', env.CONFIG_FILE) }}
           restore-keys: |
-            staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) }}-
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-
+          enableCrossOsArchive: false
+          fail-on-cache-miss: false
 
       - name: Fast-mode config tweaks
         if: ${{ github.event.inputs.fast == 'true' }}
-        shell: bash
         run: |
           set -e
           cd openwrt
@@ -183,13 +216,26 @@ jobs:
           make defconfig
 
       - name: Download Sources
+        shell: bash
         run: |
           cd openwrt
-          make download -j"$(nproc)" V=s || make download -j1 V=s
+          for i in {1..3}; do
+            echo "Download attempt $i..."
+            if make download -j"$(nproc)" V=s || make download -j1 V=s; then
+              echo "Download successful"
+              break
+            else
+              echo "Download attempt $i failed, waiting 30s before retry..."
+              sleep 30
+            fi
+            if [ $i -eq 3 ]; then
+              echo "All download attempts failed"
+              exit 1
+            fi
+          done
 
       - name: Mount tmpfs for openwrt/tmp (fast mode)
         if: ${{ github.event.inputs.fast == 'true' }}
-        shell: bash
         run: |
           # Only attempt on Linux self-hosted runner
           if [ "$(uname -s)" != "Linux" ]; then
@@ -207,7 +253,6 @@ jobs:
           }
 
       - name: Configure compiler optimizations
-        shell: bash
         run: |
           # Set GCC parameters for faster compilation
           export NPROC=$(nproc)
@@ -226,7 +271,6 @@ jobs:
           ccache --set-config=compiler_check=content
           
       - name: Pre-build diagnostics
-        shell: bash
         run: |
           echo "=== Disk usage ==="
           df -h || true
@@ -247,7 +291,6 @@ jobs:
           ls -l /proc/$$/fd 2>/dev/null || true
 
       - name: Build Firmware
-        shell: bash
         run: |
           set -o pipefail
           cd openwrt
@@ -280,24 +323,48 @@ jobs:
 
       - name: Collect build logs
         if: always()
-        shell: bash
         run: |
           mkdir -p build-logs
+          # Save main build log
           if [ -f openwrt/build.log ]; then
-            cp openwrt/build.log build-logs/
+            cp openwrt/build.log build-logs/main-build.log
           fi
+          # Save package build logs
           if [ -d openwrt/logs ]; then
-            cp -r openwrt/logs/* build-logs/ || true
+            find openwrt/logs -type f -name "*.log" -exec cp {} build-logs/ \;
+          fi
+          # Save compile logs
+          for log in $(find openwrt/build_dir -type f -name "*.log"); do
+            mkdir -p "build-logs/compile/$(dirname "${log#openwrt/build_dir/}")"
+            cp "$log" "build-logs/compile/$(dirname "${log#openwrt/build_dir/}")/"
+          done
+          # Create log summary
+          echo "=== Build Log Summary ===" > build-logs/summary.txt
+          echo "Date: $(date)" >> build-logs/summary.txt
+          echo "Device: $DEVICE" >> build-logs/summary.txt
+          echo "Branch: $OPENWRT_BRANCH" >> build-logs/summary.txt
+          echo "" >> build-logs/summary.txt
+          if [ -f openwrt/build.log ]; then
+            echo "Last 100 lines of build.log:" >> build-logs/summary.txt
+            tail -n 100 openwrt/build.log >> build-logs/summary.txt
           fi
       - name: Extract build errors
         if: always()
-        shell: bash
         run: |
+          mkdir -p build-logs
           if [ -f build-logs/build-errors.txt ]; then
             rm -f build-logs/build-errors.txt
           fi
           if [ -f openwrt/build.log ]; then
-            grep -i -E 'error:|failed|undefined|not found|No rule to make target' openwrt/build.log > build-logs/build-errors.txt || true
+            {
+              echo "=== Build Errors Summary ===" > build-logs/build-errors.txt
+              echo "Timestamp: $(date -u)" >> build-logs/build-errors.txt
+              echo "" >> build-logs/build-errors.txt
+              grep -i -E 'error:|failed|undefined|not found|No rule to make target|collect2:|recipe for target.*failed' openwrt/build.log >> build-logs/build-errors.txt || true
+              echo "" >> build-logs/build-errors.txt
+              echo "=== Last 50 lines of build.log ===" >> build-logs/build-errors.txt
+              tail -n 50 openwrt/build.log >> build-logs/build-errors.txt || true
+            }
           fi
       - name: Upload build logs
         if: always()
@@ -313,6 +380,15 @@ jobs:
           name: build-errors-${{ matrix.device }}
           path: build-logs/build-errors.txt
           if-no-files-found: warn
+
+      - name: Find package artifacts
+        if: always()
+        shell: bash
+        run: |
+          echo "=== Looking for curl build artifacts ==="
+          find openwrt/build_dir -name "curl*" -type d -ls || true
+          find openwrt/staging_dir -name "curl*" -type d -ls || true
+
       - name: Upload package build artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -345,7 +421,6 @@ jobs:
             # Fail early so remaining steps don't attempt to operate on missing artifacts
             exit 1
           fi
-        shell: bash
 
       - name: Optimize Binaries
         run: |
