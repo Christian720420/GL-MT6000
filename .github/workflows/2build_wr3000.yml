@@ -57,9 +57,9 @@ jobs:
             ${{ env.DL_DIR }}
             dl
             openwrt/dl
-          key: dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) }}-${{ hashFiles('feeds.conf.default') }}
+          key: dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ hashFiles('feeds.conf.default') }}
           restore-keys: |
-            dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) }}-
+            dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-
             dl-${{ runner.os }}-${{ matrix.device }}-
             dl-${{ runner.os }}-
 
@@ -69,9 +69,9 @@ jobs:
           path: |
             ${{ env.CCACHE_DIR }}
             .ccache
-          key: ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) }}-${{ hashFiles('feeds.conf.default') }}-${{ github.sha }}
+          key: ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ hashFiles('feeds.conf.default') }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(format('{0}', env.CONFIG_FILE)) }}-${{ hashFiles('feeds.conf.default') }}-
+            ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ hashFiles('feeds.conf.default') }}-
             ccache-${{ runner.os }}-${{ matrix.device }}-
           enableCrossOsArchive: false
 
@@ -285,7 +285,6 @@ retry-max-time = 600
 ipv4
 CURLCFG
           mkdir -p dl
-          # Use make download with retries
           for i in {1..5}; do
             echo "Download attempt $i..."
             rm -f .download_error || true
@@ -454,7 +453,6 @@ CURLCFG
           if [ -d "$ARTDIR" ]; then
             cd "$ARTDIR"
             ls -lh || true
-            find . -type f -name "*sysupgrade*.bin" -print0 | xargs -0 --no-run-if-empty file || true
             for f in *sysupgrade*.bin; do
               if [ -f "$f" ]; then
                 strip --strip-unneeded "$f" || true
@@ -491,7 +489,6 @@ CURLCFG
           cd openwrt/bin/targets/${TARGET}/${SUBTARGET} || exit 0
           DATE=$(date +%F)
           RELEASE_NAME="${DEVICE}-custom-${DATE}"
-          # Only create a release if images are present
           if ls *sysupgrade*.bin.gz > /dev/null 2>&1; then
             gh release delete "$RELEASE_NAME" --cleanup-tag -y 2>/dev/null || true
             gh release create "$RELEASE_NAME" \
@@ -521,7 +518,6 @@ CURLCFG
         if: always()
         run: |
           set -eux
-          # Unmount bound build_dir if mounted
           if mountpoint -q openwrt/build_dir; then
             sudo umount -l openwrt/build_dir || true
           fi
