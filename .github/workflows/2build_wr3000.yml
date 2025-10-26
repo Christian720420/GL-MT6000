@@ -274,24 +274,24 @@ jobs:
           git config --global http.postBuffer 1048576000 || true
           git config --global core.compression 9 || true
           cat > ~/.wgetrc <<'WGETCFG'
-timeout = 60
-tries = 5
-wait = 20
-retry_connrefused = on
-connection_timeout = 60
-read_timeout = 60
-dns_timeout = 60
-waitretry = 20
-prefer-family = IPv4
-WGETCFG
+          timeout = 60
+          tries = 5
+          wait = 20
+          retry_connrefused = on
+          connection_timeout = 60
+          read_timeout = 60
+          dns_timeout = 60
+          waitretry = 20
+          prefer-family = IPv4
+          WGETCFG
           cat > ~/.curlrc <<'CURLCFG'
-max-time = 300
-connect-timeout = 60
-retry = 5
-retry-delay = 20
-retry-max-time = 600
-ipv4
-CURLCFG
+          max-time = 300
+          connect-timeout = 60
+          retry = 5
+          retry-delay = 20
+          retry-max-time = 600
+          ipv4
+          CURLCFG
           mkdir -p dl
           for i in {1..5}; do
             echo "Download attempt $i..."
@@ -318,7 +318,7 @@ CURLCFG
       # ---------------------- Build (robust + retries) -----------------------
       - name: Build OpenWrt firmware (smart retries + logs)
         run: |
-          set -o pipefail -e
+          set -e -o pipefail
           cd openwrt
           export CCACHE_DIR="$CCACHE_DIR"
           export PATH="/usr/lib/ccache:$PATH"
