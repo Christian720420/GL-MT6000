@@ -90,7 +90,7 @@ jobs:
             !openwrt/staging_dir/**/.configured*
             !openwrt/staging_dir/**/files-*
             !openwrt/staging_dir/**/stamps
-          key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('feeds.conf.default', env.CONFIG_FILE) }}
+          key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('feeds.conf.default') }}-${{ hashFiles(env.CONFIG_FILE) }}
           restore-keys: |
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-
