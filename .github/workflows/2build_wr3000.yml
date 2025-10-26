@@ -55,11 +55,10 @@ jobs:
         with:
           path: |
             ${{ env.DL_DIR }}
-            dl
             openwrt/dl
-          key: dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ hashFiles('feeds.conf.default') }}
+          key: dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}-${{ hashFiles('feeds.conf.default') }}
           restore-keys: |
-            dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-
+            dl-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}-
             dl-${{ runner.os }}-${{ matrix.device }}-
             dl-${{ runner.os }}-
 
@@ -69,9 +68,9 @@ jobs:
           path: |
             ${{ env.CCACHE_DIR }}
             .ccache
-          key: ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ hashFiles('feeds.conf.default') }}-${{ github.sha }}
+          key: ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}-${{ hashFiles('feeds.conf.default') }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles(env.CONFIG_FILE) }}-${{ hashFiles('feeds.conf.default') }}-
+            ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}-${{ hashFiles('feeds.conf.default') }}-
             ccache-${{ runner.os }}-${{ matrix.device }}-
           enableCrossOsArchive: false
 
@@ -90,7 +89,7 @@ jobs:
             !openwrt/staging_dir/**/.configured*
             !openwrt/staging_dir/**/files-*
             !openwrt/staging_dir/**/stamps
-          key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('feeds.conf.default') }}-${{ hashFiles(env.CONFIG_FILE) }}
+          key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('feeds.conf.default') }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}
           restore-keys: |
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-
@@ -109,7 +108,8 @@ jobs:
             python3-setuptools \
             git curl wget rsync gawk unzip time \
             quilt diffstat ed gettext subversion mold \
-            asciidoc xmlto sphinxsearch jq gh
+            asciidoc xmlto sphinxsearch jq gh \
+            aria2 axel
 
       - name: Setup and tune ccache
         run: |
@@ -145,6 +145,13 @@ jobs:
               sleep 15
             fi
           done
+
+      - name: Setup DL Directory Symlink
+        run: |
+          mkdir -p "${{ env.DL_DIR }}"
+          cd openwrt
+          rm -rf dl
+          ln -s "${{ env.DL_DIR }}" dl
 
       - name: Clone GL-MT6000 Customs
         run: |
@@ -205,6 +212,7 @@ jobs:
           df -h
 
       - name: Mount tmpfs for build_dir & tmp (fast-mode and auto-detect)
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.fast == 'true' }}
         run: |
           set -eux
           cd $GITHUB_WORKSPACE
@@ -446,7 +454,7 @@ CURLCFG
             exit 1
           fi
 
-      - name: Optimize Binaries (strip + gzip)
+      - name: Optimize Binaries (gzip)
         if: always()
         run: |
           ARTDIR="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
@@ -455,7 +463,6 @@ CURLCFG
             ls -lh || true
             for f in *sysupgrade*.bin; do
               if [ -f "$f" ]; then
-                strip --strip-unneeded "$f" || true
                 gzip -9 -c "$f" > "$f".gz || true
               fi
             done
