@@ -196,17 +196,25 @@ jobs:
           free -h || true
           df -h || true
           TOTAL_MEM=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
-          if [ "$TOTAL_MEM" -lt 16000 ]; then
-            echo "Low memory detected (${TOTAL_MEM}MB). Creating 8GB swap..."
-            sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile
+          if sudo -n true 2>/dev/null; then
+            echo "Passwordless sudo available."
+            if [ "$TOTAL_MEM" -lt 16000 ]; then
+              echo "Low memory detected (${TOTAL_MEM}MB). Creating 8GB swap..."
+              sudo -n fallocate -l 8G /swapfile || sudo -n dd if=/dev/zero of=/swapfile bs=1M count=8192
+              sudo -n chmod 600 /swapfile
+              sudo -n mkswap /swapfile
+              sudo -n swapon /swapfile
+            else
+              echo "Sufficient RAM available (${TOTAL_MEM}MB), skipping swap creation."
+            fi
+            sudo -n sysctl -w vm.swappiness=10 || true
+            sudo -n sysctl -w fs.file-max=2097152 || true
           else
-            echo "Sufficient RAM available (${TOTAL_MEM}MB), skipping swap creation."
+            echo "Passwordless sudo not available, skipping privileged optimizations."
+            if [ "$TOTAL_MEM" -lt 16000 ]; then
+              echo "Warning: Low memory detected (${TOTAL_MEM}MB), but unable to create swap without sudo."
+            fi
           fi
-          sudo sysctl -w vm.swappiness=10 || true
-          sudo sysctl -w fs.file-max=2097152 || true
           ulimit -n 65535 || true
           free -h
           df -h
@@ -228,30 +236,34 @@ jobs:
           fi
           echo "Attempting to mount tmpfs of ${SIZE_MB}M at openwrt/tmp and openwrt/build_dir"
           MOUNT_OK=0
-          if sudo mount -t tmpfs -o size=${SIZE_MB}M tmpfs openwrt/tmp 2>/dev/null; then
-            MOUNT_OK=1
-            echo "Mounted tmpfs at openwrt/tmp"
-          else
-            echo "Mount tmpfs for openwrt/tmp failed; will continue and try bind fallback"
-          fi
-          if sudo mount -t tmpfs -o size=$((SIZE_MB/2))M tmpfs openwrt/build_dir 2>/dev/null; then
-            echo "Mounted tmpfs at openwrt/build_dir"
-            MOUNT_OK=1
-          else
-            echo "Mount tmpfs for openwrt/build_dir failed; attempting bind fallback"
-            if [ -d /dev/shm ]; then
-              mkdir -p /dev/shm/openwrt-build
-              chmod 777 /dev/shm/openwrt-build
-              sudo mount --bind /dev/shm/openwrt-build openwrt/build_dir || true
+          if sudo -n true 2>/dev/null; then
+            if sudo -n mount -t tmpfs -o size=${SIZE_MB}M tmpfs openwrt/tmp 2>/dev/null; then
               MOUNT_OK=1
-            elif [ -d /tmp ]; then
-              mkdir -p /tmp/openwrt-build
-              chmod 777 /tmp/openwrt-build
-              sudo mount --bind /tmp/openwrt-build openwrt/build_dir || true
+              echo "Mounted tmpfs at openwrt/tmp"
+            else
+              echo "Mount tmpfs for openwrt/tmp failed; will continue and try bind fallback"
+            fi
+            if sudo -n mount -t tmpfs -o size=$((SIZE_MB/2))M tmpfs openwrt/build_dir 2>/dev/null; then
+              echo "Mounted tmpfs at openwrt/build_dir"
               MOUNT_OK=1
             else
-              echo "No tmpfs or bind targets available — continuing using disk-backed build_dir"
+              echo "Mount tmpfs for openwrt/build_dir failed; attempting bind fallback"
+              if [ -d /dev/shm ]; then
+                mkdir -p /dev/shm/openwrt-build
+                chmod 777 /dev/shm/openwrt-build
+                sudo -n mount --bind /dev/shm/openwrt-build openwrt/build_dir || true
+                MOUNT_OK=1
+              elif [ -d /tmp ]; then
+                mkdir -p /tmp/openwrt-build
+                chmod 777 /tmp/openwrt-build
+                sudo -n mount --bind /tmp/openwrt-build openwrt/build_dir || true
+                MOUNT_OK=1
+              else
+                echo "No tmpfs or bind targets available — continuing using disk-backed build_dir"
+              fi
             fi
+          else
+            echo "Passwordless sudo not available, skipping tmpfs mount."
           fi
           if [ "$MOUNT_OK" -eq 1 ]; then
             chmod -R 777 openwrt/tmp openwrt/build_dir || true
@@ -525,14 +537,18 @@ jobs:
         if: always()
         run: |
           set -eux
-          if mountpoint -q openwrt/build_dir; then
-            sudo umount -l openwrt/build_dir || true
-          fi
-          if mountpoint -q openwrt/tmp; then
-            sudo umount -l openwrt/tmp || true
-          fi
-          if grep -q "/swapfile" /proc/swaps; then
-            echo "Removing swap..."
-            sudo swapoff /swapfile || true
-            sudo rm -f /swapfile || true
+          if sudo -n true 2>/dev/null; then
+            if mountpoint -q openwrt/build_dir; then
+              sudo -n umount -l openwrt/build_dir || true
+            fi
+            if mountpoint -q openwrt/tmp; then
+              sudo -n umount -l openwrt/tmp || true
+            fi
+            if grep -q "/swapfile" /proc/swaps; then
+              echo "Removing swap..."
+              sudo -n swapoff /swapfile || true
+              sudo -n rm -f /swapfile || true
+            fi
+          else
+            echo "Passwordless sudo not available, skipping cleanup of privileged resources."
           fi
