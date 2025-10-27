@@ -130,7 +130,6 @@ jobs:
       - name: Configure Git for large transfers
         run: |
           git config --global http.postBuffer 1048576000
-          git config --global http.version HTTP/1.1
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
 
@@ -145,6 +144,10 @@ jobs:
               sleep 15
             fi
           done
+          if [ ! -d openwrt ]; then
+            echo "Failed to clone OpenWrt repository after 5 attempts."
+            exit 1
+          fi
 
       - name: Setup DL Directory Symlink
         run: |
@@ -174,12 +177,17 @@ jobs:
         run: |
           set -eux
           cd openwrt
+          UPDATED=false
           for i in {1..5}; do
-            ./scripts/feeds update -a && break || {
+            ./scripts/feeds update -a && UPDATED=true && break || {
               echo "Feed update attempt $i failed, retrying in 15s..."
               sleep 15
             }
           done
+          if ! $UPDATED; then
+            echo "Failed to update feeds after 5 attempts."
+            exit 1
+          fi
           ./scripts/feeds install -a
 
       - name: Apply Custom Config and defconfig
