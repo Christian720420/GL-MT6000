@@ -72,29 +72,18 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-${{ matrix.device }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}-${{ hashFiles('feeds.conf.default') }}-
             ccache-${{ runner.os }}-${{ matrix.device }}-
-          enableCrossOsArchive: false
 
       - name: Cache staging_dir & toolchain (selective)
         uses: actions/cache@v4
         with:
           path: |
-            openwrt/staging_dir/**/*
-            openwrt/build_dir/toolchain-*/**/*
-            openwrt/build_dir/host/**/*
-            !openwrt/staging_dir/**/*.o
-            !openwrt/staging_dir/**/*.d
-            !openwrt/staging_dir/**/*.cmd
-            !openwrt/staging_dir/**/.built
-            !openwrt/staging_dir/**/.staged
-            !openwrt/staging_dir/**/.configured*
-            !openwrt/staging_dir/**/files-*
-            !openwrt/staging_dir/**/stamps
+            openwrt/staging_dir
+            openwrt/build_dir/toolchain-*
+            openwrt/build_dir/host
           key: staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-${{ hashFiles('feeds.conf.default') }}-${{ hashFiles('${{ env.CONFIG_FILE }}') }}
           restore-keys: |
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-${{ matrix.device }}-
             staging-${{ runner.os }}-${{ env.OPENWRT_BRANCH }}-
-          enableCrossOsArchive: false
-          fail-on-cache-miss: false
 
       # ---------------------- System prep & dependencies -----------------------
       - name: Install Dependencies
@@ -165,6 +154,7 @@ jobs:
         run: |
           cd openwrt
           if [ -d ../gl-mt6000/files ]; then
+            mkdir -p files
             cp -r ../gl-mt6000/files/* files/ 2>/dev/null || true
             echo "Custom files applied"
           fi
@@ -496,8 +486,8 @@ jobs:
           cd openwrt/bin/targets/${TARGET}/${SUBTARGET} || exit 0
           if ls *sysupgrade*.bin.gz > /dev/null 2>&1; then
             sha256sum *sysupgrade*.bin.gz > SHA256SUMS.txt || true
-            mkdir -p ../../../../build-images
-            cp -a *sysupgrade*.bin.gz SHA256SUMS.txt ../../../../build-images/ || true
+            mkdir -p ../../../../../build-images
+            cp -a *sysupgrade*.bin.gz SHA256SUMS.txt ../../../../../build-images/ || true
           fi
 
       - name: Upload build artifacts
