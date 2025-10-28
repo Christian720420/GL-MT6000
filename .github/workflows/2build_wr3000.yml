@@ -277,7 +277,7 @@ jobs:
             local feed="$1"
             local INSTALLED=false
             for i in {1..5}; do
-              if ./scripts/feeds install -p "$feed" 2>/dev/null; then
+              if ./scripts/feeds install -p "$feed"; then
                 INSTALLED=true
                 echo "Successfully installed feed $feed on attempt $i"
                 return 0
@@ -408,7 +408,7 @@ jobs:
           
           if sudo -n true 2>/dev/null; then
             # Try tmpfs for tmp directory
-            if sudo mount -t tmpfs -o size=${SIZE_MB}M,mode=755,noatime,nodiratime tmpfs openwrt/tmp 2>/dev/null; then
+            if sudo mount -t tmpfs -o size=${SIZE_MB}M,mode=755,noatime,nodiratime,uid=$(id -u),gid=$(id -g) tmpfs openwrt/tmp 2>/dev/null; then
               MOUNT_OK=1
               echo "✓ Mounted tmpfs at openwrt/tmp"
             else
@@ -417,7 +417,7 @@ jobs:
             
             # Try tmpfs for build_dir with 60% of allocated size
             BUILD_SIZE=$(( SIZE_MB * 60 / 100 ))
-            if sudo mount -t tmpfs -o size=${BUILD_SIZE}M,mode=755,noatime,nodiratime tmpfs openwrt/build_dir 2>/dev/null; then
+            if sudo mount -t tmpfs -o size=${BUILD_SIZE}M,mode=755,noatime,nodiratime,uid=$(id -u),gid=$(id -g) tmpfs openwrt/build_dir 2>/dev/null; then
               MOUNT_OK=1
               echo "✓ Mounted tmpfs at openwrt/build_dir (${BUILD_SIZE}MB)"
             else
@@ -448,7 +448,7 @@ jobs:
             echo "No tmpfs mounts succeeded — continuing with disk-backed build directories"
           else
             # Set proper permissions
-            chmod 755 openwrt/tmp openwrt/build_dir
+            chmod 755 openwrt/tmp openwrt/build_dir || echo "Warning: Failed to chmod tmpfs directories"
             echo "✓ tmpfs optimization enabled for maximum speed"
           fi
 
