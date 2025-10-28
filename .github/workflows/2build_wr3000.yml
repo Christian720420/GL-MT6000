@@ -235,24 +235,97 @@ jobs:
         run: |
           set -eu
           cd openwrt
-          UPDATED=false
-          for i in {1..5}; do
-            if ./scripts/feeds update -a; then
-              UPDATED=true
-              echo "Successfully updated feeds on attempt $i"
-              break
-            else
-              echo "Feed update attempt $i failed, retrying in 15s..."
-              sleep 15
+          
+          # Determine feed config file
+          FEED_CONF="feeds.conf"
+          if [ ! -f "$FEED_CONF" ]; then
+            FEED_CONF="feeds.conf.default"
+          fi
+          
+          # Extract feed names (assuming src-git lines)
+          feed_names=$(awk '/^src-git/ {print $2}' "$FEED_CONF")
+          
+          echo "Feeds to update: $feed_names"
+          
+          # Function to update a single feed with retries
+          update_feed() {
+            local feed="$1"
+            local UPDATED=false
+            for i in {1..5}; do
+              if ./scripts/feeds update "$feed"; then
+                UPDATED=true
+                echo "Successfully updated feed $feed on attempt $i"
+                return 0
+              else
+                echo "Feed $feed update attempt $i failed, retrying in 15s..."
+                sleep 15
+              fi
+            done
+            if ! $UPDATED; then
+              echo "ERROR: Failed to update feed $feed after 5 attempts."
+              return 1
+            fi
+          }
+          
+          # Launch updates in parallel
+          pids=()
+          for feed in $feed_names; do
+            update_feed "$feed" &
+            pids+=($!)
+          done
+          
+          # Wait for all and check exit statuses
+          failed=0
+          for pid in "${pids[@]}"; do
+            if ! wait "$pid"; then
+              failed=1
             fi
           done
           
-          if ! $UPDATED; then
-            echo "ERROR: Failed to update feeds after 5 attempts."
+          if [ $failed -eq 1 ]; then
+            echo "ERROR: One or more feed updates failed."
             exit 1
           fi
           
-          ./scripts/feeds install -a
+          # Function to install a single feed with retries
+          install_feed() {
+            local feed="$1"
+            local INSTALLED=false
+            for i in {1..5}; do
+              if ./scripts/feeds install -p "$feed"; then
+                INSTALLED=true
+                echo "Successfully installed feed $feed on attempt $i"
+                return 0
+              else
+                echo "Feed $feed install attempt $i failed, retrying in 15s..."
+                sleep 15
+              fi
+            done
+            if ! $INSTALLED; then
+              echo "ERROR: Failed to install feed $feed after 5 attempts."
+              return 1
+            fi
+          }
+          
+          # Launch installs in parallel
+          pids=()
+          for feed in $feed_names; do
+            install_feed "$feed" &
+            pids+=($!)
+          done
+          
+          # Wait for all and check exit statuses
+          failed=0
+          for pid in "${pids[@]}"; do
+            if ! wait "$pid"; then
+              failed=1
+            fi
+          done
+          
+          if [ $failed -eq 1 ]; then
+            echo "ERROR: One or more feed installs failed."
+            exit 1
+          fi
 
       - name: Apply Custom Config and defconfig
         run: |
@@ -541,12 +614,23 @@ jobs:
           rm -f build.log
           SUCCESS=0
           
-          echo "=== Build attempt 1: aggressive parallel (jobs=$JOBS) ===" | tee -a build.log
-          if make -j"$JOBS" V=s 2>&1 | tee -a build.log; then
+          echo "=== Build attempt 1: parallel kernel + packages (jobs=$JOBS) ===" | tee -a build.log
+          
+          JOBS2=$((JOBS / 2))
+          if [ $JOBS2 -lt 1 ]; then JOBS2=1; fi
+          
+          if make tools/install -j"$JOBS" V=s 2>&1 | tee -a build.log && \
+             make toolchain/install -j"$JOBS" V=s 2>&1 | tee -a build.log && \
+             (make target/compile -j"$JOBS2" V=s 2>&1 | tee -a kernel.log & make package/compile -j"$JOBS2" V=s 2>&1 | tee -a packages.log & wait) && \
+             cat kernel.log packages.log >> build.log && rm -f kernel.log packages.log && \
+             make package/index V=s 2>&1 | tee -a build.log && \
+             make target/install -j1 V=s 2>&1 | tee -a build.log && \
+             make checksum V=s 2>&1 | tee -a build.log; then
             echo "✓ Build succeeded on attempt 1" | tee -a build.log
             SUCCESS=1
           else
             echo "✗ Build attempt 1 failed" | tee -a build.log
+            rm -f kernel.log packages.log
           fi
           
           if [ $SUCCESS -eq 0 ]; then
