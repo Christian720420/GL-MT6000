@@ -257,8 +257,8 @@ jobs:
           ccache --set-config=compression_level=1 || echo "Warning: Failed to set compression level (using fast compression)"
           ccache --set-config=sloppiness=file_macro,include_file_mtime,include_file_ctime,time_macros,pch_defines,file_stat_matches || echo "Warning: Failed to set sloppiness"
           ccache --set-config=compiler_check=mtime || echo "Warning: Failed to set compiler check"
-          ccache --set-config=max_files=0 || echo "Warning: Failed to disable file limit"
-          ccache --set-config=hash_dir=false || echo "Warning: Failed to disable hash_dir"
+          ccache --set-config=max_files=0 || true
+          ccache --set-config=hash_dir=false || true
           ccache -z || echo "Warning: Failed to zero ccache stats"
           
           echo "=== CCache Configuration (Optimized for Speed) ==="
@@ -765,12 +765,12 @@ jobs:
           if [ -d "$ARTDIR" ]; then
             cd "$ARTDIR"
             ls -lh
-            for f in *sysupgrade*.bin; do
-              if [ -f "$f" ]; then
-                echo "Compressing $f..."
-                gzip -9 -c "$f" > "$f.gz"
-              fi
-            done
+            
+            # Parallel compression for speed
+            echo "Compressing binaries in parallel..."
+            find . -name "*sysupgrade*.bin" -type f | xargs -P"$(nproc)" -I{} sh -c 'pigz -9 -c "{}" > "{}.gz" || gzip -9 -c "{}" > "{}.gz"'
+            
+            echo "✓ Compression complete"
           fi
 
       - name: Generate Checksums
@@ -864,11 +864,16 @@ jobs:
               sudo umount -l openwrt/tmp || echo "Warning: Failed to unmount tmp"
             fi
             
-            # Remove swap if present
+            # Remove swap if present (only if we created a 16GB one)
             if grep -q "/swapfile" /proc/swaps 2>/dev/null; then
-              echo "Removing swap..."
-              sudo swapoff /swapfile || echo "Warning: Failed to swapoff"
-              sudo rm -f /swapfile || echo "Warning: Failed to remove swapfile"
+              SWAP_SIZE=$(stat -f /swapfile 2>/dev/null | awk '{print $2}' || echo "0")
+              if [ "$SWAP_SIZE" -gt 15000000000 ]; then
+                echo "Removing large swap..."
+                sudo swapoff /swapfile || echo "Warning: Failed to swapoff"
+                sudo rm -f /swapfile || echo "Warning: Failed to remove swapfile"
+              else
+                echo "Keeping existing swap (not created by this workflow)"
+              fi
             fi
             
             # Cleanup bind mounts from /dev/shm or /tmp
@@ -880,6 +885,18 @@ jobs:
             if [ -d /tmp/openwrt-build ]; then
               echo "Cleaning /tmp/openwrt-build..."
               sudo rm -rf /tmp/openwrt-build || echo "Warning: Failed to clean /tmp/openwrt-build"
+            fi
+            
+            # Restore default kernel parameters
+            sudo sysctl -w vm.swappiness=60 2>/dev/null || true
+            sudo sysctl -w vm.dirty_ratio=20 2>/dev/null || true
+            sudo sysctl -w vm.dirty_background_ratio=10 2>/dev/null || true
+            
+            # Restore CPU governor
+            if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
+              for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+                echo "ondemand" | sudo tee "$cpu" 2>/dev/null || echo "schedutil" | sudo tee "$cpu" 2>/dev/null || true
+              done
             fi
             
             echo "✓ Cleanup completed"
