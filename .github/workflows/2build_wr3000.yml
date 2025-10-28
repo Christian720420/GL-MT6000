@@ -301,6 +301,11 @@ jobs:
         run: |
           cp "$CONFIG_FILE" openwrt/.config
           cd openwrt
+          echo "CONFIG_PACKAGE_libev=y" >> .config
+          echo "CONFIG_PACKAGE_libpam=y" >> .config
+          echo "CONFIG_PACKAGE_libtirpc=y" >> .config
+          echo "CONFIG_PACKAGE_liblzma=y" >> .config
+          echo "CONFIG_PACKAGE_libnetsnmp=y" >> .config
           make defconfig
 
       # ---------------------- tmpfs + swap + pre-warm -----------------------
@@ -777,6 +782,13 @@ jobs:
             cp -a *sysupgrade*.bin.gz SHA256SUMS.txt ../../../../../build-images/
           fi
 
+      - name: Create Zip Archive
+        if: success() && github.event_name != 'pull_request'
+        run: |
+          set -eu
+          cd openwrt/bin/targets/${TARGET}/${SUBTARGET}
+          zip -r openwrt-${DEVICE}-custom.zip *sysupgrade*.bin.gz SHA256SUMS.txt
+
       - name: Upload build artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -804,7 +816,7 @@ jobs:
             gh release create "$RELEASE_NAME" \
               --title "Custom OpenWrt $DEVICE Build ($DATE)" \
               --notes "Adapted from GL-MT6000 customs: SSH hardening, UCI QoL, WireGuard/PBR/AdBlock/QoS. Built with ccache and optimizations." \
-              *sysupgrade*.bin.gz SHA256SUMS.txt
+              *sysupgrade*.bin.gz SHA256SUMS.txt openwrt-${DEVICE}-custom.zip
             
             echo "✓ Release created: $RELEASE_NAME"
           else
