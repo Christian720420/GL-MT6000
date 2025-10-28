@@ -267,25 +267,10 @@ jobs:
             fi
           }
           
-          # Launch updates in parallel
-          pids=()
+          # Update feeds sequentially to avoid race conditions
           for feed in $feed_names; do
-            update_feed "$feed" &
-            pids+=($!)
+            update_feed "$feed" || exit 1
           done
-          
-          # Wait for all and check exit statuses
-          failed=0
-          for pid in "${pids[@]}"; do
-            if ! wait "$pid"; then
-              failed=1
-            fi
-          done
-          
-          if [ $failed -eq 1 ]; then
-            echo "ERROR: One or more feed updates failed."
-            exit 1
-          fi
           
           # Function to install a single feed with retries
           install_feed() {
@@ -307,25 +292,10 @@ jobs:
             fi
           }
           
-          # Launch installs in parallel
-          pids=()
+          # Install feeds sequentially to avoid race conditions
           for feed in $feed_names; do
-            install_feed "$feed" &
-            pids+=($!)
+            install_feed "$feed" || exit 1
           done
-          
-          # Wait for all and check exit statuses
-          failed=0
-          for pid in "${pids[@]}"; do
-            if ! wait "$pid"; then
-              failed=1
-            fi
-          done
-          
-          if [ $failed -eq 1 ]; then
-            echo "ERROR: One or more feed installs failed."
-            exit 1
-          fi
 
       - name: Apply Custom Config and defconfig
         run: |
@@ -614,15 +584,12 @@ jobs:
           rm -f build.log
           SUCCESS=0
           
-          echo "=== Build attempt 1: parallel kernel + packages (jobs=$JOBS) ===" | tee -a build.log
-          
-          JOBS2=$((JOBS / 2))
-          if [ $JOBS2 -lt 1 ]; then JOBS2=1; fi
+          echo "=== Build attempt 1: sequential steps with parallel jobs (jobs=$JOBS) ===" | tee -a build.log
           
           if make tools/install -j"$JOBS" V=s 2>&1 | tee -a build.log && \
              make toolchain/install -j"$JOBS" V=s 2>&1 | tee -a build.log && \
-             (make target/compile -j"$JOBS2" V=s 2>&1 | tee -a kernel.log & make package/compile -j"$JOBS2" V=s 2>&1 | tee -a packages.log & wait) && \
-             cat kernel.log packages.log >> build.log && rm -f kernel.log packages.log && \
+             make target/compile -j"$JOBS" V=s 2>&1 | tee -a build.log && \
+             make package/compile -j"$JOBS" V=s 2>&1 | tee -a build.log && \
              make package/index V=s 2>&1 | tee -a build.log && \
              make target/install -j1 V=s 2>&1 | tee -a build.log && \
              make checksum V=s 2>&1 | tee -a build.log; then
@@ -630,7 +597,6 @@ jobs:
             SUCCESS=1
           else
             echo "✗ Build attempt 1 failed" | tee -a build.log
-            rm -f kernel.log packages.log
           fi
           
           if [ $SUCCESS -eq 0 ]; then
