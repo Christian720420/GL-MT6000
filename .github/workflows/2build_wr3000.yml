@@ -144,14 +144,14 @@ jobs:
             quilt diffstat ed gettext subversion mold \
             asciidoc xmlto sphinxsearch jq gh \
             aria2 axel ninja-build cmake \
-            libelf-dev
+            libelf-dev pigz
 
       - name: Setup and tune ccache
         run: |
           set -eu
           mkdir -p "${{ env.CCACHE_DIR }}" .ccache
           
-          # Set proper ownership and permissions (755 for dirs, 644 for files)
+          # Set proper ownership and permissions
           chmod 755 "${{ env.CCACHE_DIR }}" .ccache
           
           export CCACHE_DIR="${{ env.CCACHE_DIR }}"
@@ -160,14 +160,14 @@ jobs:
           # Configure ccache with aggressive caching for speed
           ccache -M "${{ env.CCACHE_SIZE }}" || echo "Warning: Failed to set ccache size limit"
           ccache --set-config=compression=true || echo "Warning: Failed to enable ccache compression"
-          ccache --set-config=compression_level=1 || echo "Warning: Failed to set compression level (using fast compression)"
+          ccache --set-config=compression_level=1 || echo "Warning: Failed to set compression level"
           ccache --set-config=sloppiness=file_macro,include_file_mtime,include_file_ctime,time_macros,pch_defines,file_stat_matches || echo "Warning: Failed to set sloppiness"
           ccache --set-config=compiler_check=mtime || echo "Warning: Failed to set compiler check"
           ccache --set-config=max_files=0 || true
           ccache --set-config=hash_dir=false || true
           ccache -z || echo "Warning: Failed to zero ccache stats"
           
-          echo "=== CCache Configuration (Optimized for Speed) ==="
+          echo "=== CCache Configuration ==="
           ccache -p || echo "Warning: Failed to print ccache config"
 
       # ---------------------- Clone repos & apply customs -----------------------
@@ -176,6 +176,7 @@ jobs:
           git config --global http.postBuffer 1048576000
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
+          git config --global core.compression 9
 
       - name: Clone OpenWrt Base (retry up to 5)
         run: |
@@ -226,9 +227,6 @@ jobs:
           else
             echo "No custom files directory found"
           fi
-          if [ -f ../gl-mt6000/mt6000.config ]; then
-            echo "Custom mt6000 config exists (for reference)"
-          fi
 
       # ---------------------- feeds & config -----------------------
       - name: Update and Install Feeds (robust)
@@ -242,7 +240,7 @@ jobs:
             FEED_CONF="feeds.conf.default"
           fi
           
-          # Extract feed names (assuming src-git lines)
+          # Extract feed names
           feed_names=$(awk '/^src-git/ {print $2}' "$FEED_CONF")
           
           echo "Feeds to update: $feed_names"
@@ -250,10 +248,8 @@ jobs:
           # Function to update a single feed with retries
           update_feed() {
             local feed="$1"
-            local UPDATED=false
             for i in {1..5}; do
               if ./scripts/feeds update "$feed"; then
-                UPDATED=true
                 echo "Successfully updated feed $feed on attempt $i"
                 return 0
               else
@@ -261,13 +257,11 @@ jobs:
                 sleep 15
               fi
             done
-            if ! $UPDATED; then
-              echo "ERROR: Failed to update feed $feed after 5 attempts."
-              return 1
-            fi
+            echo "ERROR: Failed to update feed $feed after 5 attempts."
+            return 1
           }
           
-          # Update feeds sequentially to avoid race conditions
+          # Update feeds sequentially
           for feed in $feed_names; do
             update_feed "$feed" || exit 1
           done
@@ -275,10 +269,8 @@ jobs:
           # Function to install a single feed with retries
           install_feed() {
             local feed="$1"
-            local INSTALLED=false
             for i in {1..5}; do
               if ./scripts/feeds install -p "$feed"; then
-                INSTALLED=true
                 echo "Successfully installed feed $feed on attempt $i"
                 return 0
               else
@@ -286,13 +278,11 @@ jobs:
                 sleep 15
               fi
             done
-            if ! $INSTALLED; then
-              echo "ERROR: Failed to install feed $feed after 5 attempts."
-              return 1
-            fi
+            echo "ERROR: Failed to install feed $feed after 5 attempts."
+            return 1
           }
           
-          # Install feeds sequentially to avoid race conditions
+          # Install feeds sequentially
           for feed in $feed_names; do
             install_feed "$feed" || exit 1
           done
@@ -319,52 +309,44 @@ jobs:
       - name: Optimize runner (swap + system tuning)
         run: |
           set -eu
-          echo "=== Preparing system environment (Performance Optimized) ==="
+          echo "=== Preparing system environment ==="
           free -h
           df -h
           
-          # Use available memory instead of total
           AVAILABLE_MEM=$(grep MemAvailable /proc/meminfo | awk '{print int($2/1024)}')
           
           if sudo -n true 2>/dev/null; then
-            echo "Passwordless sudo available - applying aggressive optimizations."
+            echo "Applying system optimizations..."
             
-            # Only create swap if available memory is low
+            # Create swap only if available memory is low
             if [ "$AVAILABLE_MEM" -lt 8192 ]; then
-              echo "Low available memory detected (${AVAILABLE_MEM}MB). Creating 16GB swap..."
+              echo "Low available memory (${AVAILABLE_MEM}MB). Creating 16GB swap..."
               if [ ! -f /swapfile ]; then
                 sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
                 sudo chmod 600 /swapfile
                 sudo mkswap /swapfile
                 sudo swapon /swapfile
                 echo "Swap created and activated"
-              else
-                echo "Swap file already exists"
               fi
             else
-              echo "Sufficient available RAM (${AVAILABLE_MEM}MB), skipping swap creation."
+              echo "Sufficient RAM (${AVAILABLE_MEM}MB), skipping swap creation."
             fi
             
-            # Aggressive kernel tuning for build performance
-            sudo sysctl -w vm.swappiness=1 || echo "Warning: Failed to set swappiness"
-            sudo sysctl -w vm.dirty_ratio=80 || echo "Warning: Failed to set dirty_ratio"
-            sudo sysctl -w vm.dirty_background_ratio=5 || echo "Warning: Failed to set dirty_background_ratio"
-            sudo sysctl -w vm.dirty_expire_centisecs=12000 || echo "Warning: Failed to set dirty_expire"
-            sudo sysctl -w fs.file-max=2097152 || echo "Warning: Failed to set file-max"
-            sudo sysctl -w kernel.sched_migration_cost_ns=5000000 || echo "Warning: Failed to set sched_migration"
-            sudo sysctl -w kernel.sched_autogroup_enabled=0 || echo "Warning: Failed to disable autogroup"
+            # Kernel tuning for build performance
+            sudo sysctl -w vm.swappiness=1 || true
+            sudo sysctl -w vm.dirty_ratio=80 || true
+            sudo sysctl -w vm.dirty_background_ratio=5 || true
+            sudo sysctl -w vm.dirty_expire_centisecs=12000 || true
+            sudo sysctl -w fs.file-max=2097152 || true
+            sudo sysctl -w kernel.sched_migration_cost_ns=5000000 || true
+            sudo sysctl -w kernel.sched_autogroup_enabled=0 || true
             
-            # I/O scheduler optimization (if available)
+            # I/O scheduler optimization
             for disk in /sys/block/sd*/queue/scheduler; do
               if [ -f "$disk" ]; then
                 echo "none" | sudo tee "$disk" 2>/dev/null || echo "mq-deadline" | sudo tee "$disk" 2>/dev/null || true
               fi
             done
-          else
-            echo "Passwordless sudo not available, skipping privileged optimizations."
-            if [ "$AVAILABLE_MEM" -lt 8192 ]; then
-              echo "WARNING: Low available memory (${AVAILABLE_MEM}MB), but unable to create swap without sudo."
-            fi
           fi
           
           # CPU governor to performance mode
@@ -372,58 +354,48 @@ jobs:
             for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
               echo "performance" | sudo tee "$cpu" 2>/dev/null || true
             done
-            echo "CPU governor set to performance mode"
           fi
           
-          ulimit -n 65535 || echo "Warning: Failed to set ulimit"
+          ulimit -n 65535 || true
           
           echo "=== Final system state ==="
           free -h
           df -h
 
-      - name: Mount tmpfs for build_dir & tmp (fast-mode and auto-detect)
+      - name: Mount tmpfs for build_dir & tmp (fast-mode)
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.fast == 'true' }}
         run: |
           set -eu
           cd "$GITHUB_WORKSPACE"
-          mkdir -p openwrt/tmp openwrt/build_dir openwrt/build_dir/host
+          mkdir -p openwrt/tmp openwrt/build_dir
           
-          # Get total and available memory
-          TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
           AVAILABLE_MEM_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
-          
-          # Calculate size based on available memory (more aggressive for speed)
           PERCENT="${{ env.TMPFS_PERCENT }}"
           SIZE_MB=$(( AVAILABLE_MEM_MB * PERCENT / 100 ))
           
-          # Higher cap for better performance
           if [ "$SIZE_MB" -gt 40960 ]; then SIZE_MB=40960; fi
           if [ "$SIZE_MB" -lt 2048 ]; then
-            echo "Not enough available RAM for tmpfs (${AVAILABLE_MEM_MB}MB available, need >3GB) — using disk-backed build dirs."
+            echo "Not enough RAM for tmpfs (${AVAILABLE_MEM_MB}MB available) — using disk."
             exit 0
           fi
           
-          echo "Attempting to mount tmpfs of ${SIZE_MB}MB (${PERCENT}% of ${AVAILABLE_MEM_MB}MB available)"
+          echo "Mounting tmpfs of ${SIZE_MB}MB"
           MOUNT_OK=0
           
           if sudo -n true 2>/dev/null; then
-            # Try tmpfs for tmp directory
+            # Mount tmpfs for tmp
             if sudo mount -t tmpfs -o size=${SIZE_MB}M,mode=755,noatime,nodiratime,uid=$(id -u),gid=$(id -g) tmpfs openwrt/tmp 2>/dev/null; then
               MOUNT_OK=1
               echo "✓ Mounted tmpfs at openwrt/tmp"
-            else
-              echo "✗ Failed to mount tmpfs for openwrt/tmp"
             fi
             
-            # Try tmpfs for build_dir with 60% of allocated size
+            # Mount tmpfs for build_dir
             BUILD_SIZE=$(( SIZE_MB * 60 / 100 ))
             if sudo mount -t tmpfs -o size=${BUILD_SIZE}M,mode=755,noatime,nodiratime,uid=$(id -u),gid=$(id -g) tmpfs openwrt/build_dir 2>/dev/null; then
               MOUNT_OK=1
               echo "✓ Mounted tmpfs at openwrt/build_dir (${BUILD_SIZE}MB)"
             else
-              echo "✗ Failed to mount tmpfs for openwrt/build_dir, trying bind fallback"
-              
-              # Fallback to bind mount from /dev/shm or /tmp
+              # Fallback to bind mount
               if [ -d /dev/shm ]; then
                 mkdir -p /dev/shm/openwrt-build
                 chmod 755 /dev/shm/openwrt-build
@@ -431,92 +403,49 @@ jobs:
                   MOUNT_OK=1
                   echo "✓ Bind-mounted /dev/shm to openwrt/build_dir"
                 fi
-              elif [ -d /tmp ]; then
-                mkdir -p /tmp/openwrt-build
-                chmod 755 /tmp/openwrt-build
-                if sudo mount --bind /tmp/openwrt-build openwrt/build_dir; then
-                  MOUNT_OK=1
-                  echo "✓ Bind-mounted /tmp to openwrt/build_dir"
-                fi
               fi
             fi
-          else
-            echo "Passwordless sudo not available, skipping tmpfs mount."
           fi
           
           if [ "$MOUNT_OK" -eq 0 ]; then
-            echo "No tmpfs mounts succeeded — continuing with disk-backed build directories"
+            echo "No tmpfs mounts succeeded — using disk"
           else
-            # Set proper permissions
-            chmod 755 openwrt/tmp openwrt/build_dir || echo "Warning: Failed to chmod tmpfs directories"
-            echo "✓ tmpfs optimization enabled for maximum speed"
+            chmod 755 openwrt/tmp openwrt/build_dir || true
+            echo "✓ tmpfs optimization enabled"
           fi
 
-      - name: Pre-warm and show ccache stats
+      - name: Pre-warm ccache
         run: |
-          set -eu
           export CCACHE_DIR="${{ env.CCACHE_DIR }}"
           export PATH="/usr/lib/ccache:$PATH"
           echo "=== CCache stats before build ==="
-          ccache -s || echo "Warning: Failed to show ccache stats"
+          ccache -s || true
 
-      # ---------------------- Download Sources (robust) -----------------------
-      - name: Download Sources (make download with mirror fallbacks)
+      # ---------------------- Download Sources -----------------------
+      - name: Download Sources (with retries)
         shell: bash
         run: |
           set -eu
           cd openwrt
           
-          # Configure git for better handling
           git config --global http.postBuffer 1048576000
           git config --global core.compression 9
-          
-          # Create temporary wget/curl configs with aggressive settings
-          WGET_CFG=$(mktemp)
-          cat > "$WGET_CFG" <<'WGETCFG'
-          timeout = 30
-          tries = 3
-          wait = 5
-          retry_connrefused = on
-          connection_timeout = 30
-          read_timeout = 30
-          dns_timeout = 30
-          waitretry = 5
-          prefer-family = IPv4
-          WGETCFG
-          
-          CURL_CFG=$(mktemp)
-          cat > "$CURL_CFG" <<'CURLCFG'
-          max-time = 180
-          connect-timeout = 30
-          retry = 3
-          retry-delay = 5
-          retry-max-time = 300
-          ipv4
-          CURLCFG
-          
-          export WGETRC="$WGET_CFG"
-          export CURL_HOME=$(dirname "$CURL_CFG")
           
           mkdir -p dl
           SUCCESS=0
           
-          # Parallel download with aria2c for speed
           export DOWNLOAD_UTILITIES="aria2c curl wget axel"
           
           for i in {1..3}; do
             echo "=== Download attempt $i ==="
             case $i in
               1) 
-                # Aggressive parallel download
                 if make download -j"$(($(nproc) * 2))" V=s; then SUCCESS=1; fi
                 ;;
               2) 
-                # Fallback to moderate parallel
                 if make download -j"$(nproc)" V=s; then SUCCESS=1; fi
                 ;;
               3) 
-                # Last resort: sequential
                 if make download -j1 V=s; then SUCCESS=1; fi
                 ;;
             esac
@@ -527,22 +456,18 @@ jobs:
             else
               echo "✗ Download attempt $i failed"
               if [ $i -lt 3 ]; then
-                echo "Waiting 10s before retry..."
                 sleep 10
               fi
             fi
           done
-          
-          # Cleanup temp configs
-          rm -f "$WGET_CFG" "$CURL_CFG"
           
           if [ "$SUCCESS" -ne 1 ]; then
             echo "ERROR: All download attempts failed"
             exit 1
           fi
 
-      # ---------------------- Build (robust + retries) -----------------------
-      - name: Build OpenWrt firmware (smart retries + logs)
+      # ---------------------- Build -----------------------
+      - name: Build OpenWrt firmware (smart retries)
         run: |
           set -e -o pipefail
           cd openwrt
@@ -554,49 +479,47 @@ jobs:
           # Determine parallel jobs
           if [ "${{ env.PARALLEL_JOBS }}" = "0" ]; then
             JOBS=$(($(nproc) + 2))
-            echo "Auto-detected jobs: $JOBS (nproc + 2)"
+            echo "Auto-detected jobs: $JOBS"
           else
             JOBS="${{ env.PARALLEL_JOBS }}"
             echo "Using configured jobs: $JOBS"
           fi
           
-          # Ninja build system for faster builds if available
+          # Use Ninja if available
           if command -v ninja >/dev/null 2>&1; then
             export CMAKE_GENERATOR="Ninja"
             echo "✓ Using Ninja build system"
           fi
           
           echo "=== Initial ccache stats ==="
-          ccache -s || echo "Warning: Failed to show ccache stats"
+          ccache -s || true
           
-          # Check for mold linker (much faster than ld)
+          # Use mold linker if available
           if command -v mold >/dev/null 2>&1; then
-            echo "✓ Using mold linker for maximum speed"
+            echo "✓ Using mold linker"
             export LD=mold
             export LDFLAGS="-fuse-ld=mold"
           elif command -v lld >/dev/null 2>&1; then
-            echo "✓ Using lld linker (fallback)"
+            echo "✓ Using lld linker"
             export LD=lld
             export LDFLAGS="-fuse-ld=lld"
-          else
-            echo "Using default linker (consider installing mold for 2-5x faster linking)"
           fi
           
-          # LTO if enabled (slower first build, faster rebuilds)
+          # LTO if enabled
           if [ "${{ env.ENABLE_LTO }}" = "true" ]; then
             echo "✓ Link Time Optimization enabled"
             export CFLAGS="-flto=auto"
             export CXXFLAGS="-flto=auto"
           fi
           
-          # Performance-oriented compiler flags
+          # Performance compiler flags
           export CFLAGS="${CFLAGS:-} -O2 -pipe -march=native -mtune=native"
           export CXXFLAGS="${CXXFLAGS:-} -O2 -pipe -march=native -mtune=native"
           
           rm -f build.log
           SUCCESS=0
           
-          echo "=== Build attempt 1: sequential steps with parallel jobs (jobs=$JOBS) ===" | tee -a build.log
+          echo "=== Build attempt 1: sequential steps with parallel jobs ===" | tee -a build.log
           
           if make tools/install -j"$JOBS" V=s 2>&1 | tee -a build.log && \
              make toolchain/install -j"$JOBS" V=s 2>&1 | tee -a build.log && \
@@ -612,7 +535,7 @@ jobs:
           fi
           
           if [ $SUCCESS -eq 0 ]; then
-            echo "=== Build attempt 2: conservative parallel (jobs=$((JOBS/2))) ===" | tee -a build.log
+            echo "=== Build attempt 2: conservative parallel ===" | tee -a build.log
             if make -j"$((JOBS/2))" V=s 2>&1 | tee -a build.log; then
               echo "✓ Build succeeded on attempt 2" | tee -a build.log
               SUCCESS=1
@@ -622,7 +545,7 @@ jobs:
           fi
           
           if [ $SUCCESS -eq 0 ]; then
-            echo "=== Build attempt 3: single-threaded (deterministic) ===" | tee -a build.log
+            echo "=== Build attempt 3: single-threaded ===" | tee -a build.log
             if make -j1 V=s 2>&1 | tee -a build.log; then
               echo "✓ Build succeeded on attempt 3" | tee -a build.log
               SUCCESS=1
@@ -637,15 +560,10 @@ jobs:
           fi
           
           echo "=== Final ccache stats ==="
-          ccache -s || echo "Warning: Failed to show ccache stats"
-          
-          # Calculate build time improvement
-          if [ -n "${CCACHE_HIT_RATE:-}" ]; then
-            echo "CCache hit rate: ${CCACHE_HIT_RATE}%"
-          fi
+          ccache -s || true
 
-      # ---------------------- Collect logs & extract errors -----------------------
-      - name: Collect build logs and environment info
+      # ---------------------- Collect logs -----------------------
+      - name: Collect build logs
         if: always()
         run: |
           set -e
@@ -653,37 +571,27 @@ jobs:
           
           cd openwrt 2>/dev/null || exit 0
           
-          # Copy main build log
           [ -f build.log ] && cp -f build.log ../build-logs/main-build.log
-          
-          # Copy logs directory
           [ -d logs ] && cp -r logs ../build-logs/
           
-          # Collect package-specific logs (limited to last 200 lines)
           find build_dir -type f -name "*.log" 2>/dev/null | while IFS= read -r f; do
             dest="../build-logs/$(dirname "${f#build_dir/}")"
             mkdir -p "$dest"
             tail -n 200 "$f" > "$dest/$(basename "$f")" 2>/dev/null || true
           done
           
-          # Create summary
           {
             echo "=== OpenWrt Build Summary ==="
             date -u
             echo ""
             uname -a
             echo ""
-            echo "Disk usage:"
             df -h
             echo ""
-            echo "Memory usage:"
             free -m
-            echo ""
-            echo "Ulimit info:"
-            ulimit -a
           } > ../build-logs/summary.txt
 
-      - name: Extract failing package and concise error summary
+      - name: Extract error summary
         if: always()
         run: |
           mkdir -p build-logs
@@ -698,14 +606,12 @@ jobs:
             echo ""
           } > "$ERR"
           
-          # Extract errors with context
           grep -i -E '(^error: |: error:|No rule to make target|recipe for target|undefined reference|collect2: fatal|internal compiler error)' "$LOG" -B3 -A6 2>/dev/null | head -n 1000 >> "$ERR" || true
           
           echo "" >> "$ERR"
           echo "=== Last 200 lines of build.log ===" >> "$ERR"
           tail -n 200 "$LOG" >> "$ERR" 2>/dev/null || true
           
-          # Try to identify failing package
           PKG=$(grep -E "package/.*/.*:|Error 2" "$LOG" 2>/dev/null | sed -E 's/.*package\/([^\/]+)\/([^:]+).*/\1\/\2/' | head -n1 || true)
           
           if [ -n "$PKG" ]; then
@@ -713,19 +619,12 @@ jobs:
             echo "Likely failing package: $PKG" >> "$ERR"
             mkdir -p "build-logs/packages/$PKG"
             
-            # Collect package logs
             find openwrt -type f -path "*/$PKG/*.log" 2>/dev/null | while IFS= read -r p; do
               tail -n 500 "$p" > "build-logs/packages/$PKG/$(basename "$p")" 2>/dev/null || true
             done
-            
-            find openwrt/build_dir -type f -path "*/$PKG/*.log" 2>/dev/null | while IFS= read -r p; do
-              tail -n 500 "$p" > "build-logs/packages/$PKG/$(basename "$p")" 2>/dev/null || true
-            done
-          else
-            echo "Could not identify a specific failing package" >> "$ERR"
           fi
 
-      - name: Upload summarized build logs
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -733,7 +632,7 @@ jobs:
           path: build-logs/
           if-no-files-found: warn
 
-      - name: Upload raw OpenWrt logs
+      - name: Upload raw logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -744,25 +643,24 @@ jobs:
             openwrt/build_dir/**/*.log
           if-no-files-found: warn
 
-      # ---------------------- Find & upload artifacts if build succeeded -----------------------
-      - name: Verify Build Success and collect images
+      # ---------------------- Artifacts -----------------------
+      - name: Verify Build Success
         if: success()
         run: |
           ARTDIR="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
           echo "Checking for sysupgrade images in $ARTDIR"
           
           if [ -d "$ARTDIR" ] && ls "$ARTDIR"/*sysupgrade*.bin >/dev/null 2>&1; then
-            echo "✓ Build artifacts found in $ARTDIR"
+            echo "✓ Build artifacts found"
             ls -lh "$ARTDIR"
             mkdir -p build-images
             cp -a "$ARTDIR"/*sysupgrade*.bin* build-images/
           else
-            echo "ERROR: No sysupgrade images found in $ARTDIR"
-            ls -la openwrt/bin/targets 2>/dev/null || echo "targets directory not found"
+            echo "ERROR: No sysupgrade images found"
             exit 1
           fi
 
-      - name: Optimize Binaries (gzip)
+      - name: Compress Binaries
         if: success()
         run: |
           ARTDIR="openwrt/bin/targets/${TARGET}/${SUBTARGET}"
@@ -770,8 +668,7 @@ jobs:
             cd "$ARTDIR"
             ls -lh
             
-            # Parallel compression for speed
-            echo "Compressing binaries in parallel..."
+            echo "Compressing binaries..."
             find . -name "*sysupgrade*.bin" -type f | xargs -P"$(nproc)" -I{} sh -c 'pigz -9 -c "{}" > "{}.gz" || gzip -9 -c "{}" > "{}.gz"'
             
             echo "✓ Compression complete"
@@ -804,7 +701,7 @@ jobs:
           path: build-images/
           if-no-files-found: error
 
-      - name: Create GitHub Release (if images present)
+      - name: Create GitHub Release
         if: success() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -816,21 +713,17 @@ jobs:
           RELEASE_NAME="${DEVICE}-custom-${DATE}"
           
           if ls *sysupgrade*.bin.gz >/dev/null 2>&1; then
-            # Delete old release if exists
-            gh release delete "$RELEASE_NAME" --cleanup-tag -y 2>/dev/null || echo "No existing release to delete"
+            gh release delete "$RELEASE_NAME" --cleanup-tag -y 2>/dev/null || true
             
-            # Create new release
             gh release create "$RELEASE_NAME" \
               --title "Custom OpenWrt $DEVICE Build ($DATE)" \
-              --notes "Adapted from GL-MT6000 customs: SSH hardening, UCI QoL, WireGuard/PBR/AdBlock/QoS. Built with ccache and optimizations." \
+              --notes "Custom OpenWrt build with GL-MT6000 optimizations: SSH hardening, WireGuard, AdBlock, QoS. Built with ccache and performance optimizations." \
               *sysupgrade*.bin.gz SHA256SUMS.txt openwrt-${DEVICE}-custom.zip
             
             echo "✓ Release created: $RELEASE_NAME"
-          else
-            echo "No images present; skipping release creation."
           fi
 
-      - name: Build Summary (upload to job summary)
+      - name: Build Summary
         if: always()
         run: |
           set -eu
@@ -843,9 +736,8 @@ jobs:
               echo "- **Image size:** $IMAGE_SIZE"
             fi
             
-            echo "- **Base Repo:** Official OpenWrt + GL-MT6000 customs"
-            echo "- **OpenWrt Branch:** $OPENWRT_BRANCH"
-            echo "- **Config File:** $CONFIG_FILE"
+            echo "- **Base:** OpenWrt $OPENWRT_BRANCH + GL-MT6000 customs"
+            echo "- **Config:** $CONFIG_FILE"
             echo ""
             echo "#### CCache Stats"
             echo '```'
@@ -856,49 +748,37 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       # ---------------------- Cleanup -----------------------
-      - name: Cleanup swap & unmount tmpfs
+      - name: Cleanup resources
         if: always()
         run: |
           set -eu
           
           if sudo -n true 2>/dev/null; then
-            echo "=== Cleaning up privileged resources ==="
+            echo "=== Cleaning up resources ==="
             
-            # Unmount tmpfs if mounted
+            # Unmount tmpfs
             if mountpoint -q openwrt/build_dir 2>/dev/null; then
-              echo "Unmounting openwrt/build_dir..."
-              sudo umount -l openwrt/build_dir || echo "Warning: Failed to unmount build_dir"
+              sudo umount -l openwrt/build_dir || true
             fi
             
             if mountpoint -q openwrt/tmp 2>/dev/null; then
-              echo "Unmounting openwrt/tmp..."
-              sudo umount -l openwrt/tmp || echo "Warning: Failed to unmount tmp"
+              sudo umount -l openwrt/tmp || true
             fi
             
-            # Remove swap if present (only if we created a 16GB one)
+            # Remove swap if created by this workflow
             if grep -q "/swapfile" /proc/swaps 2>/dev/null; then
               SWAP_SIZE=$(stat -f /swapfile 2>/dev/null | awk '{print $2}' || echo "0")
               if [ "$SWAP_SIZE" -gt 15000000000 ]; then
-                echo "Removing large swap..."
-                sudo swapoff /swapfile || echo "Warning: Failed to swapoff"
-                sudo rm -f /swapfile || echo "Warning: Failed to remove swapfile"
-              else
-                echo "Keeping existing swap (not created by this workflow)"
+                sudo swapoff /swapfile || true
+                sudo rm -f /swapfile || true
               fi
             fi
             
-            # Cleanup bind mounts from /dev/shm or /tmp
-            if [ -d /dev/shm/openwrt-build ]; then
-              echo "Cleaning /dev/shm/openwrt-build..."
-              sudo rm -rf /dev/shm/openwrt-build || echo "Warning: Failed to clean /dev/shm/openwrt-build"
-            fi
+            # Cleanup bind mounts
+            [ -d /dev/shm/openwrt-build ] && sudo rm -rf /dev/shm/openwrt-build || true
+            [ -d /tmp/openwrt-build ] && sudo rm -rf /tmp/openwrt-build || true
             
-            if [ -d /tmp/openwrt-build ]; then
-              echo "Cleaning /tmp/openwrt-build..."
-              sudo rm -rf /tmp/openwrt-build || echo "Warning: Failed to clean /tmp/openwrt-build"
-            fi
-            
-            # Restore default kernel parameters
+            # Restore kernel parameters
             sudo sysctl -w vm.swappiness=60 2>/dev/null || true
             sudo sysctl -w vm.dirty_ratio=20 2>/dev/null || true
             sudo sysctl -w vm.dirty_background_ratio=10 2>/dev/null || true
@@ -911,23 +791,17 @@ jobs:
             fi
             
             echo "✓ Cleanup completed"
-          else
-            echo "Passwordless sudo not available, skipping cleanup of privileged resources."
           fi
 
-      - name: Emergency Cleanup on Cancellation
+      - name: Emergency Cleanup
         if: cancelled()
         run: |
-          set -eu
-          echo "=== Emergency cleanup triggered ==="
-          
           if sudo -n true 2>/dev/null; then
-            # Force unmount everything
+            echo "=== Emergency cleanup ==="
             sudo umount -lf openwrt/build_dir 2>/dev/null || true
             sudo umount -lf openwrt/tmp 2>/dev/null || true
             sudo swapoff /swapfile 2>/dev/null || true
             sudo rm -f /swapfile 2>/dev/null || true
-            sudo rm -rf /dev/shm/openwrt-build 2>/dev/null || true
-            sudo rm -rf /tmp/openwrt-build 2>/dev/null || true
+            sudo rm -rf /dev/shm/openwrt-build /tmp/openwrt-build 2>/dev/null || true
             echo "✓ Emergency cleanup completed"
           fi
