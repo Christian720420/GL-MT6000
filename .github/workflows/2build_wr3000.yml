@@ -1,98 +1,4 @@
-# ---------------------- Build (robust + retries) -----------------------
-      - name: Build OpenWrt firmware (smart retries + logs)
-        run: |
-          set -e -o pipefail
-          cd openwrt
-          
-          export CCACHE_DIR="$CCACHE_DIR"
-          export PATH="/usr/lib/ccache:$PATH"
-          export FORCE_UNSAFE_CONFIGURE=1
-          
-          # Determine parallel jobs
-          if [ "${{ env.PARALLEL_JOBS }}" = "0" ]; then
-            JOBS=$(($(nproc) + 2))
-            echo "Auto-detected jobs: $JOBS (nproc + 2)"
-          else
-            JOBS="${{ env.PARALLEL_JOBS }}"
-            echo "Using configured jobs: $JOBS"
-          fi
-          
-          # Ninja build system for faster builds if available
-          if command -v ninja >/dev/null 2>&1; then
-            export CMAKE_GENERATOR="Ninja"
-            echo "✓ Using Ninja build system"
-          fi
-          
-          echo "=== Initial ccache stats ==="
-          ccache -s || echo "Warning: Failed to show ccache stats"
-          
-          # Check for mold linker (much faster than ld)
-          if command -v mold >/dev/null 2>&1; then
-            echo "✓ Using mold linker for maximum speed"
-            export LD=mold
-            export LDFLAGS="-fuse-ld=mold"
-          elif command -v lld >/dev/null 2>&1; then
-            echo "✓ Using lld linker (fallback)"
-            export LD=lld
-            export LDFLAGS="-fuse-ld=lld"
-          else
-            echo "Using default linker (consider installing mold for 2-5x faster linking)"
-          fi
-          
-          # LTO if enabled (slower first build, faster rebuilds)
-          if [ "${{ env.ENABLE_LTO }}" = "true" ]; then
-            echo "✓ Link Time Optimization enabled"
-            export CFLAGS="-flto=auto"
-            export CXXFLAGS="-flto=auto"
-          fi
-          
-          # Performance-oriented compiler flags
-          export CFLAGS="${CFLAGS:-} -O2 -pipe -march=native -mtune=native"
-          export CXXFLAGS="${CXXFLAGS:-} -O2 -pipe -march=native -mtune=native"
-          
-          rm -f build.log
-          SUCCESS=0
-          
-          echo "=== Build attempt 1: aggressive parallel (jobs=$JOBS) ===" | tee -a build.log
-          if make -j"$JOBS" V=s 2>&1 | tee -a build.log; then
-            echo "✓ Build succeeded on attempt 1" | tee -a build.log
-            SUCCESS=1
-          else
-            echo "✗ Build attempt 1 failed" | tee -a build.log
-          fi
-          
-          if [ $SUCCESS -eq 0 ]; then
-            echo "=== Build attempt 2: conservative parallel (jobs=$((JOBS/2))) ===" | tee -a build.log
-            if make -j"$((JOBS/2))" V=s 2>&1 | tee -a build.log; then
-              echo "✓ Build succeeded on attempt 2" | tee -a build.log
-              SUCCESS=1
-            else
-              echo "✗ Build attempt 2 failed" | tee -a build.log
-            fi
-          fi
-          
-          if [ $SUCCESS -eq 0 ]; then
-            echo "=== Build attempt 3: single-threaded (deterministic) ===" | tee -a build.log
-            if make -j1 V=s 2>&1 | tee -a build.log; then
-              echo "✓ Build succeeded on attempt 3" | tee -a build.log
-              SUCCESS=1
-            else
-              echo "✗ Build attempt 3 failed" | tee -a build.log
-            fi
-          fi
-          
-          if [ $SUCCESS -ne 1 ]; then
-            echo "ERROR: All build attempts failed" | tee -a build.log
-            exit 1
-          fi
-          
-          echo "=== Final ccache stats ==="
-          ccache -s || echo "Warning: Failed to show ccache stats"
-          
-          # Calculate build time improvement
-          if [ -n "${CCACHE_HIT_RATE:-}" ]; then
-            echo "CCache hit rate: ${CCACHE_HIT_RATE}%"
-          finame: Advanced OpenWrt WR3000 Custom Build
+name: Advanced OpenWrt WR3000 Custom Build
 
 on:
   workflow_dispatch:
@@ -590,22 +496,53 @@ jobs:
           export PATH="/usr/lib/ccache:$PATH"
           export FORCE_UNSAFE_CONFIGURE=1
           
+          # Determine parallel jobs
+          if [ "${{ env.PARALLEL_JOBS }}" = "0" ]; then
+            JOBS=$(($(nproc) + 2))
+            echo "Auto-detected jobs: $JOBS (nproc + 2)"
+          else
+            JOBS="${{ env.PARALLEL_JOBS }}"
+            echo "Using configured jobs: $JOBS"
+          fi
+          
+          # Ninja build system for faster builds if available
+          if command -v ninja >/dev/null 2>&1; then
+            export CMAKE_GENERATOR="Ninja"
+            echo "✓ Using Ninja build system"
+          fi
+          
           echo "=== Initial ccache stats ==="
           ccache -s || echo "Warning: Failed to show ccache stats"
           
-          # Check for mold linker
-          if command -v mold >/dev/null 2>&1 && ld --version 2>&1 | grep -qi mold; then
-            echo "✓ Using mold for linking"
+          # Check for mold linker (much faster than ld)
+          if command -v mold >/dev/null 2>&1; then
+            echo "✓ Using mold linker for maximum speed"
             export LD=mold
+            export LDFLAGS="-fuse-ld=mold"
+          elif command -v lld >/dev/null 2>&1; then
+            echo "✓ Using lld linker (fallback)"
+            export LD=lld
+            export LDFLAGS="-fuse-ld=lld"
           else
-            echo "Using default linker (mold not available)"
+            echo "Using default linker (consider installing mold for 2-5x faster linking)"
           fi
+          
+          # LTO if enabled (slower first build, faster rebuilds)
+          if [ "${{ env.ENABLE_LTO }}" = "true" ]; then
+            echo "✓ Link Time Optimization enabled"
+            export CFLAGS="-flto=auto"
+            export CXXFLAGS="-flto=auto"
+          fi
+          
+          # Performance-oriented compiler flags
+          export CFLAGS="${CFLAGS:-} -O2 -pipe -march=native -mtune=native"
+          export CXXFLAGS="${CXXFLAGS:-} -O2 -pipe -march=native -mtune=native"
           
           rm -f build.log
           SUCCESS=0
           
-          echo "=== Build attempt 1: parallel (nproc=$(nproc)) ===" | tee -a build.log
-          if make -j"$(nproc)" V=s 2>&1 | tee -a build.log; then
+          echo "=== Build attempt 1: aggressive parallel (jobs=$JOBS) ===" | tee -a build.log
+          if make -j"$JOBS" V=s 2>&1 | tee -a build.log; then
             echo "✓ Build succeeded on attempt 1" | tee -a build.log
             SUCCESS=1
           else
@@ -613,8 +550,8 @@ jobs:
           fi
           
           if [ $SUCCESS -eq 0 ]; then
-            echo "=== Build attempt 2: single-threaded (deterministic) ===" | tee -a build.log
-            if make -j1 V=s 2>&1 | tee -a build.log; then
+            echo "=== Build attempt 2: conservative parallel (jobs=$((JOBS/2))) ===" | tee -a build.log
+            if make -j"$((JOBS/2))" V=s 2>&1 | tee -a build.log; then
               echo "✓ Build succeeded on attempt 2" | tee -a build.log
               SUCCESS=1
             else
@@ -623,8 +560,8 @@ jobs:
           fi
           
           if [ $SUCCESS -eq 0 ]; then
-            echo "=== Build attempt 3: retry with clean state ===" | tee -a build.log
-            if make -j"$(nproc)" V=s 2>&1 | tee -a build.log; then
+            echo "=== Build attempt 3: single-threaded (deterministic) ===" | tee -a build.log
+            if make -j1 V=s 2>&1 | tee -a build.log; then
               echo "✓ Build succeeded on attempt 3" | tee -a build.log
               SUCCESS=1
             else
@@ -639,6 +576,11 @@ jobs:
           
           echo "=== Final ccache stats ==="
           ccache -s || echo "Warning: Failed to show ccache stats"
+          
+          # Calculate build time improvement
+          if [ -n "${CCACHE_HIT_RATE:-}" ]; then
+            echo "CCache hit rate: ${CCACHE_HIT_RATE}%"
+          fi
 
       # ---------------------- Collect logs & extract errors -----------------------
       - name: Collect build logs and environment info
