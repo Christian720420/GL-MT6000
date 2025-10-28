@@ -144,7 +144,7 @@ jobs:
             quilt diffstat ed gettext subversion mold \
             asciidoc xmlto sphinxsearch jq gh \
             aria2 axel ninja-build cmake \
-            libelf-dev
+            libelf-dev pigz
 
       - name: Setup and tune ccache
         run: |
