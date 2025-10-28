@@ -277,7 +277,7 @@ jobs:
             local feed="$1"
             local INSTALLED=false
             for i in {1..5}; do
-              if ./scripts/feeds install -p "$feed"; then
+              if ./scripts/feeds install -p "$feed" 2>/dev/null; then
                 INSTALLED=true
                 echo "Successfully installed feed $feed on attempt $i"
                 return 0
