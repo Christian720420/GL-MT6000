@@ -306,6 +306,13 @@ jobs:
           echo "CONFIG_PACKAGE_libtirpc=y" >> .config
           echo "CONFIG_PACKAGE_liblzma=y" >> .config
           echo "CONFIG_PACKAGE_libnetsnmp=y" >> .config
+          echo "CONFIG_BUSYBOX_CONFIG_PAM=n" >> .config
+          echo "CONFIG_BUSYBOX_CONFIG_FEATURE_MOUNT_NFS=n" >> .config
+          echo "CONFIG_PACKAGE_audit=n" >> .config
+          echo "CONFIG_PACKAGE_kexec=n" >> .config
+          echo "CONFIG_PACKAGE_kexec-tools=n" >> .config
+          echo "CONFIG_PACKAGE_lldpd=n" >> .config
+          echo "CONFIG_PACKAGE_policycoreutils=n" >> .config
           make defconfig
 
       # ---------------------- tmpfs + swap + pre-warm -----------------------
