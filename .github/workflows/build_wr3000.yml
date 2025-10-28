@@ -1,148 +1,93 @@
-name: Build OpenWrt for GL-MT6000 (Self-Hosted)
-
-permissions:
-  contents: write
-  actions: write
+name: Advanced OpenWrt WR3000 Custom Build
 
 on:
   workflow_dispatch:
+    inputs:
+      fast:
+        description: 'Enable fast build mode (lighter config, tmpfs use if available)'
+        required: false
+        default: 'false'
   push:
-    branches:
-      - main
+    branches: [ main ]
   schedule:
-    - cron: "38 1 * * *" # build daily at 01:38 UTC
+    - cron: "0 3 * * *" # Daily 03:00 UTC build
 
 env:
-  OPENWRT_REPO: https://github.com/openwrt/openwrt.git
+  OPENWRT_REPO: https://github.com/openwrt/openwrt.git  # GitHub mirror for stability
   OPENWRT_BRANCH: openwrt-24.10
-  CONFIG_FILE: wr3000.config
-  CCACHE_DIR: ${{ github.workspace }}/.ccache
-  CCACHE_BASEDIR: ${{ github.workspace }}
-  CCACHE_COMPRESS: 1
-  CCACHE_COMPILERCHECK: content
-  CC: "ccache gcc"
-  CXX: "ccache g++"
 
 jobs:
   build:
-    name: Build OpenWrt (GL-MT6000) on Self Runner
     runs-on: self-hosted
-
+    env:
+      CCACHE_DIR: /mnt/ccache
     steps:
-      # 📦 Checkout your GL-MT6000 repo
-      - name: Checkout GL-MT6000 repository
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          repository: Christian720420/GL-MT6000
-          path: source_repo
 
-      # 🛠️ Install build dependencies
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential libncurses-dev libssl-dev \
-            python3-setuptools zlib1g-dev libtool \
-            autoconf automake pkg-config git curl wget \
-            ccache
-      # ⚡ Cache ccache for faster rebuilds
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: selfrunner-ccache-${{ hashFiles('source_repo/*.config') }}
-          restore-keys: |
-            selfrunner-ccache-
-      # 🔍 Show ccache status
-      - name: Show ccache status
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3 python3-stdlib rsync unzip zlib1g-dev file wget curl ca-certificates \
+            pigz ninja-build mold lld
+
+      - name: Tune git for stability
         run: |
-          ccache -s || true
-      # 🧬 Clone OpenWrt safely with retry logic and buffer tuning
-      - name: Clone OpenWrt
-        run: |
-          if [ -d "openwrt/.git" ]; then
-            echo "⚠️ Existing OpenWrt directory found — removing..."
-            rm -rf openwrt
-          fi
-          echo "📥 Cloning OpenWrt repository..."
-          git clone -b ${{ env.OPENWRT_BRANCH }} ${{ env.OPENWRT_REPO }} openwrt
-          cd openwrt
-          # Configure Git reliability parameters
-          git config --global http.postBuffer 500M
+          git config --global http.postBuffer 524288000
           git config --global http.lowSpeedLimit 0
           git config --global http.lowSpeedTime 999999
-          git config --global http.maxRequests 10
           git config --global core.compression 0
-          git config --global url."https://github.com/".insteadOf git://github.com/
-          echo "🔄 Updating OpenWrt feeds with retry logic..."
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth 1 -b ${OPENWRT_BRANCH} ${OPENWRT_REPO} openwrt
+
+      - name: Replace feeds with GitHub mirrors
+        working-directory: ./openwrt
+        run: |
+          cat > feeds.conf.default <<'EOF'
+          src-git packages https://github.com/openwrt/packages.git;openwrt-24.10
+          src-git luci https://github.com/openwrt/luci.git;openwrt-24.10
+          src-git routing https://github.com/openwrt/routing.git;openwrt-24.10
+          src-git telephony https://github.com/openwrt/telephony.git;openwrt-24.10
+          EOF
+
+      - name: Cache OpenWrt feeds
+        uses: actions/cache@v4
+        with:
+          path: openwrt/feeds/
+          key: feeds-${{ hashFiles('openwrt/feeds.conf.default') }}
+
+      - name: Update & install feeds (with retry)
+        working-directory: ./openwrt
+        run: |
           for i in {1..5}; do
-            ./scripts/feeds update -a && ./scripts/feeds install -a && break
-            echo "⚠️ Feed update failed (attempt $i) — retrying in 20s..."
-            sleep 20
+            ./scripts/feeds update -a && break || sleep 20
           done
-      # ⚙️ Prepare OpenWrt build environment
-      - name: Prepare OpenWrt build
+          ./scripts/feeds install -a
+
+      - name: Configure build
+        working-directory: ./openwrt
         run: |
-          cd openwrt
-          if [ -f "../source_repo/${{ env.CONFIG_FILE }}" ]; then
-            cp "../source_repo/${{ env.CONFIG_FILE }}" .config
-          else
-            echo "❌ Config file missing!"
-            exit 1
-          fi
-          if [ -d "../source_repo/files" ]; then
-            cp -r ../source_repo/files ./
-          fi
+          cp ../.config . || echo 'No custom config provided'
           make defconfig
-      # 🏗️ Build firmware
-      - name: Build firmware
+
+      - name: Build OpenWrt
+        working-directory: ./openwrt
         run: |
-          cd openwrt
-          make download -j1 || { sleep 10; make download -j1 V=s; }
-          echo "🚧 Starting OpenWrt build using $(nproc) threads..."
-          make -j$(nproc) V=s || { echo "⚠️ Parallel build failed, retrying with 1 job..."; make -j1 V=s; }
-          mkdir -p ../firmware
-          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'sha256sums' -or -iname 'config.buildinfo' \) -exec mv -v {} ../firmware/ \; ||:
-          mv .config ../firmware/full.config ||:
-      # 📤 Upload firmware as build artifact
+          make -j$(nproc) V=s
+
+      - name: Compress firmware
+        if: success()
+        working-directory: ./openwrt/bin/targets
+        run: |
+          find . -type f -name '*.bin' -exec pigz -9 {} +
+
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gl-mt6000-firmware
-          path: firmware/*
-
-      # 🚀 Create GitHub release with firmware
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RELEASE_DATE=$(date +%F)
-          set +e
-          gh release delete "gl-mt6000-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" >/dev/null 2>&1
-          set -e
-          gh release create "gl-mt6000-${RELEASE_DATE}" \
-            --repo "${{ github.repository }}" \
-            --latest \
-            --title "OpenWrt Custom Build for GL-MT6000 (${RELEASE_DATE})" \
-            --notes "Custom OpenWrt firmware built for **GL-MT6000** using \`${{ env.CONFIG_FILE }}\` from branch **${{ env.OPENWRT_BRANCH }}**." \
-            firmware/*
-      # 🧽 Clean up old releases (keep 6 latest)
-      - name: Clean up old releases
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/${{ github.repository }}/releases --paginate --jq '.[6:] | .[] | "\(.id) \(.tag_name)"' | \
-          while read -r id tag; do
-            if [ -n "$id" ]; then
-              echo "🧹 Deleting old release $tag"
-              gh api -X DELETE "repos/${{ github.repository }}/releases/$id"
-              gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
-            fi
-          done
-      # 📄 Build summary
-      - name: Summary
-        run: |
-          echo "### ✅ Build Complete for GL-MT6000" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: \`${{ env.OPENWRT_BRANCH }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Config: \`${{ env.CONFIG_FILE }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Release: [View Release](https://github.com/${{ github.repository }}/releases/latest)" >> $GITHUB_STEP_SUMMARY
+          name: openwrt-wr3000-firmware
+          path: openwrt/bin/targets/**/*.bin.gz
