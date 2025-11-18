@@ -55,8 +55,7 @@ jobs:
             remote_ref: auto-next
             release_prefix: gl-mt6000
             artifact_prefix: gl-mt6000
-            runner: '["ubuntu-24.04-arm"]'
-            requires_apt: true
+            runner: '["self-hosted","linux","x64","selfrunner"]'
           - id: wr3000
             pretty: Cudy WR3000-v1
             config_file: wr3000.config
@@ -65,7 +64,6 @@ jobs:
             release_prefix: wr3000
             artifact_prefix: wr3000
             runner: '["self-hosted","linux","x64","selfrunner"]'
-            requires_apt: false
 
     steps:
       - name: Evaluate target filter
@@ -88,10 +86,14 @@ jobs:
           path: builder
 
       - name: Install build dependencies (apt)
-        if: steps.filter.outputs.skip == 'false' && matrix.requires_apt == 'true'
+        if: steps.filter.outputs.skip == 'false'
         run: |
-          sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
+          if command -v apt >/dev/null 2>&1; then
+            sudo apt update
+            sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
+          else
+            echo "Skipping apt install on non-apt runner"
+          fi
 
       - name: Fetch upstream OpenWrt source
         if: steps.filter.outputs.skip == 'false'
