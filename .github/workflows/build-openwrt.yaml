@@ -1,128 +1,220 @@
-name: Build OpenWrt for GL-MT6000
+name: Build OpenWrt Targets
 
 permissions:
   contents: write
-  actions: write
+  actions: read
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+    paths:
+      - "*.config"
+      - "files/**"
+      - ".github/workflows/build-openwrt.yaml"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which target to build"
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - gl-mt6000
+          - wr3000
+      remote_ref:
+        description: "Override upstream ref (optional)"
+        required: false
+        default: ""
   schedule:
     - cron: "38 1 * * *"
 
+concurrency:
+  group: openwrt-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  REMOTE_REPOSITORY: pesa1234/openwrt
-  CONFIG_FILE: mt6000.config
+  BUILDER_REPO: ${{ github.repository }}
+  DL_CACHE_VERSION: v1
+  ARTIFACT_RETENTION_DAYS: 10
   GH_TOKEN: ${{ github.token }}
 
 jobs:
-  check_commits:
-    name: Check for new commits
-    runs-on: ubuntu-24.04-arm
-    outputs:
-      remote_branch: ${{ steps.check_commits.outputs.remote_branch }}
-      release_prefix: ${{ steps.check_commits.outputs.release_prefix }}
-      new_commits: ${{ steps.check_commits.outputs.new_commits }}
-      latest_commit_sha: ${{ steps.check_commits.outputs.latest_commit_sha }}
-    steps:
-      - name: Check for new commits in pesa1234 repo
-        id: check_commits
-        run: |
-          remote_branch=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" | sed -e 's|\(.*heads/\)||' | grep -vi 'test' | sort -V | tail -n1)
-          [ -n "$remote_branch" ] && latest_commit_sha=$(gh api "repos/${{ env.REMOTE_REPOSITORY }}/commits/${remote_branch}" --jq .sha)
-          [ -z "$latest_commit_sha" ] && { echo "*** COULD NOT GET latest_commit_sha FROM remote_branch=$remote_branch ***" ; exit 1; }
-          gh api "repos/${{ github.repository }}/releases/latest" --jq .body 2>/dev/null | grep -q "${latest_commit_sha}" && echo "new_commits=false" >> $GITHUB_OUTPUT || echo "new_commits=true" >> $GITHUB_OUTPUT
-          echo "remote_branch=${remote_branch}"
-          echo "release_prefix=${remote_branch%.rss*}"
-          echo "latest_commit_sha=$latest_commit_sha"
-          echo "remote_branch=${remote_branch}" >> $GITHUB_OUTPUT
-          echo "release_prefix=${remote_branch%.rss*}" >> $GITHUB_OUTPUT
-          echo "latest_commit_sha=$latest_commit_sha" >> $GITHUB_OUTPUT
-
   build:
-    name: Build OpenWrt
-    needs: check_commits
-    if: github.event_name == 'workflow_dispatch' || needs.check_commits.outputs.new_commits == 'true'
-    runs-on: ubuntu-24.04-arm
+    name: Build ${{ matrix.pretty }}
+    runs-on: ${{ fromJson(matrix.runner) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: gl-mt6000
+            pretty: Flint 2 (GL-MT6000)
+            config_file: mt6000.config
+            remote_repository: pesa1234/openwrt
+            remote_ref: auto-next
+            release_prefix: gl-mt6000
+            artifact_prefix: gl-mt6000
+            runner: '["ubuntu-24.04-arm"]'
+            requires_apt: true
+          - id: wr3000
+            pretty: Cudy WR3000-v1
+            config_file: wr3000.config
+            remote_repository: openwrt/openwrt
+            remote_ref: main
+            release_prefix: wr3000
+            artifact_prefix: wr3000
+            runner: '["self-hosted","linux","x64","selfrunner"]'
+            requires_apt: false
+
     steps:
-      - name: Install dependencies
+      - name: Evaluate target filter
+        id: filter
         run: |
-          sudo apt remove -y '*cloud*' '*firefox*' '*chrome*' '*dotnet*' '*php*'
-          sudo apt update -y && sudo apt upgrade -y
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+             [ -n "${{ github.event.inputs.target }}" ] && \
+             [ "${{ github.event.inputs.target }}" != "all" ] && \
+             [ "${{ github.event.inputs.target }}" != "${{ matrix.id }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping target ${{ matrix.id }}"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout builder repository
+        if: steps.filter.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: Install build dependencies (apt)
+        if: steps.filter.outputs.skip == 'false' && matrix.requires_apt == 'true'
+        run: |
+          sudo apt update
           sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
-          sudo apt autoremove -y && sudo apt clean -y
 
-      - name: Checkout remote repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.REMOTE_REPOSITORY }}
-          ref: ${{ needs.check_commits.outputs.remote_branch }}
-
-      - name: Checkout current repository
-        uses: actions/checkout@v4
-        with:
-          path: "builder_repo"
+      - name: Fetch upstream OpenWrt source
+        if: steps.filter.outputs.skip == 'false'
+        id: upstream
+        run: |
+          set -euo pipefail
+          REF="${{ matrix.remote_ref }}"
+          if [ "$REF" = "auto-next" ]; then
+            REF=$(git ls-remote https://github.com/${{ matrix.remote_repository }}.git "refs/heads/next-*" \
+              | grep -vi 'test' \
+              | awk '{print $2}' \
+              | sed 's|refs/heads/||' \
+              | sort -V \
+              | tail -n1)
+          fi
+          if [ -n "${{ github.event.inputs.remote_ref }}" ]; then
+            REF="${{ github.event.inputs.remote_ref }}"
+          fi
+          if [ -z "$REF" ]; then
+            echo "Unable to determine upstream ref" >&2
+            exit 1
+          fi
+          git clone --filter=blob:none --single-branch --branch "$REF" https://github.com/${{ matrix.remote_repository }}.git openwrt
+          cd openwrt
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Update and install feeds
+        if: steps.filter.outputs.skip == 'false'
         run: |
+          cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # run again because sometimes it misses some dependencies
           ./scripts/feeds install -a
 
-      - name: Setup configuration and custom files
+      - name: Restore downloads cache
+        if: steps.filter.outputs.skip == 'false'
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: openwrt-dl-${{ matrix.id }}-${{ env.DL_CACHE_VERSION }}-${{ hashFiles(format('builder/{0}', matrix.config_file)) }}
+          restore-keys: |
+            openwrt-dl-${{ matrix.id }}-${{ env.DL_CACHE_VERSION }}-
+
+      - name: Prepare configuration and overlay
+        if: steps.filter.outputs.skip == 'false'
         run: |
-          mv -v builder_repo/files ./
-          sed -i 's|XXXXXX/XXXXXX|${{ github.repository }}|' ./files/usr/bin/upgrade_custom_openwrt || exit 1
-          chmod 755 ./files/usr/bin/upgrade_custom_openwrt
-          mv -v builder_repo/${{ env.CONFIG_FILE }} .config
+          cd openwrt
+          mkdir -p files
+          cp -a ../builder/files/. ./files/
+          if [ -f ./files/usr/bin/upgrade_custom_openwrt ]; then
+            sed -i "s|XXXXXX/XXXXXX|${{ github.repository }}|" ./files/usr/bin/upgrade_custom_openwrt || true
+            chmod 755 ./files/usr/bin/upgrade_custom_openwrt
+          fi
+          cp ../builder/${{ matrix.config_file }} .config
           make defconfig
 
-      - name: Build firmware
+      - name: Download sources
+        if: steps.filter.outputs.skip == 'false'
         run: |
-          make download -j$(nproc) || {
-            echo "Retrying..."
-            sleep 30
-            make download -j1 V=s
-          }
+          cd openwrt
+          make download -j$(nproc) || make download -j1 V=s
+
+      - name: Build firmware
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          cd openwrt
           make -j$(nproc) || {
-            echo "Retrying..."
-            sleep 30
+            echo "Falling back to single-thread build"
             make -j1 V=s
           }
-          mkdir -p firmware
-          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'config.buildinfo' \) -exec mv -v {} ./firmware/ \; ||:
-          mv .config firmware/full.config ||:
-          cd firmware && find -iname 'openwrt-*-sysupgrade.bin' -exec sh -c "sha256sum {} >sha256sums" \; ||:
 
-      - name: Upload artifacts
+      - name: Collect firmware artifacts
+        if: steps.filter.outputs.skip == 'false'
+        run: |
+          cd openwrt
+          ART_DIR="artifacts/${{ matrix.id }}"
+          mkdir -p "$ART_DIR"
+          cp .config "$ART_DIR/full.config"
+          find bin -type f \( -name 'openwrt-*-sysupgrade.bin' -o -name 'openwrt-*-factory.bin' -o -name 'config.buildinfo' -o -name 'sha256sums' \) -exec cp {} "$ART_DIR" \; || true
+          if ls "$ART_DIR"/openwrt-*.bin >/dev/null 2>&1; then
+            (cd "$ART_DIR" && sha256sum openwrt-*.bin > sha256sums.txt)
+          fi
+
+      - name: Upload firmware artifact
+        if: steps.filter.outputs.skip == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: gl-mt6000-firmware
-          path: firmware/*
+          name: ${{ matrix.artifact_prefix }}-firmware
+          path: openwrt/artifacts/${{ matrix.id }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
-      - name: Create release
+      - name: Prepare release notes
+        if: steps.filter.outputs.skip == 'false'
+        id: meta
         run: |
-          RELEASE_DATE=$(date +%F)
-          gh release delete "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
-          gh release create "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --repo "${{ github.repository }}" --latest --notes "### 🔄 Main Repository
-          - **Repository:** [${{ env.REMOTE_REPOSITORY }}](https://github.com/${{ env.REMOTE_REPOSITORY }})
-          - **Branch:** ${{ needs.check_commits.outputs.remote_branch }}
-          - **Commit:** ${{ needs.check_commits.outputs.latest_commit_sha }}
-          
-          ### 📝 Build Information
-          - **Target:** [Flint 2 (GL-MT6000)](https://openwrt.org/toh/gl.inet/gl-mt6000)
-          - **Configuration:** [${{ env.CONFIG_FILE }}](${{ env.CONFIG_FILE }})
-          - **WiFi UCODE scripts**
-          - **Wireguard VPN**
-          - **Policy Based Routing**
-          - **Ad Block Fast**
-          - **REMOVED:** odhcp, upnp, iptables, avahi, samba, usb storage..." --title "OpenWrt Custom Release for Flint 2 (${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE})" firmware/*
+          tag="${{ matrix.release_prefix }}-$(date +%Y%m%d-%H%M)"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=${{ matrix.pretty }} firmware ($tag)" >> "$GITHUB_OUTPUT"
+          cat <<'EOF' > release-notes-${{ matrix.id }}.md
+          ### Target
+          - Name: ${{ matrix.pretty }}
+          - Config: `${{ matrix.config_file }}`
 
-      - name: Clean up old releases
-        run: |
-          gh api repos/${{ github.repository }}/releases --paginate --jq '.[10:] | .[] | "\(.id) \(.tag_name)"' | while read id tag; do
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
-          done
+          ### Upstream
+          - Repository: https://github.com/${{ matrix.remote_repository }}
+          - Ref: ${{ steps.upstream.outputs.ref }}
+          - Commit: ${{ steps.upstream.outputs.commit }}
+
+          ### Notes
+          - Artifacts contain sysupgrade images, buildinfo, and `.config`
+          - Built from https://github.com/${{ github.repository }}
+          EOF
+
+      - name: Publish release
+        if: steps.filter.outputs.skip == 'false' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          tag: ${{ steps.meta.outputs.release_tag }}
+          name: ${{ steps.meta.outputs.release_name }}
+          bodyFile: release-notes-${{ matrix.id }}.md
+          artifacts: openwrt/artifacts/${{ matrix.id }}/*
+          replacesArtifacts: true
+          makeLatest: false

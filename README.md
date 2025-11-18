@@ -1,30 +1,163 @@
-# GL-MT6000 custom OpenWrt firmware builder
+# Custom OpenWrt Firmware Builder
 
-This repository automates the process of building OpenWrt custom firmware images for **MY** Flint 2 (GL-MT6000) router, based on **MY PREFERENCES** and [pesa1234](https://github.com/pesa1234)'s work.
+This repository provides automated build scripts and configuration for creating custom OpenWrt firmware images for routers.
 
-You should **not use** the firmwares released in this repository unless you have the same preferences/needs.
-Instead, **make a fork and adapt to your needs**.
+## 🎯 Supported Devices
 
-Read [this topic](https://forum.openwrt.org/t/mt6000-custom-build-with-luci-and-some-optimization-kernel-6-12-x/185241) in OpenWrt's forum to learn the details about pesa1234's customizations.
+- **GL-MT6000 (GL.iNet Flint 2)** - Configuration: `mt6000.config`
+- **Cudy WR3000-v1** - Configuration: `wr3000.config`
 
-Compared to his custom firmware, this firmware adds:
+## 🚀 Quick Start
+
+### 1. Setup Build Environment
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+This automatically installs all required dependencies for your Linux distribution.
+
+### 2. Build Firmware
+```bash
+chmod +x build_openwrt.sh
+./build_openwrt.sh
+```
+
+Select **option 1** for fully automated build, or use individual menu options for step-by-step control.
+
+## 📦 What's Included
+
+### Features
 - **WiFi UCODE scripts** (faster boot)
-- **Wireguard VPN**
-- **Policy Based Routing** (select what goes through VPN and what not)
-- **AdBlock Fast** (ads and malware blocking at DNS level)
+- **WireGuard VPN** with full configuration support
+- **Policy Based Routing** (PBR) - Route specific traffic through VPN
+- **AdBlock Fast** - DNS-level ad and malware blocking
+- **CAKE QoS** - Advanced traffic shaping for [cake-wg-pbr](https://github.com/lynxthecat/cake-wg-pbr)
+- **LuCI Web Interface** with HTTPS support
 
-And also:
-- **REMOVED:** odhcp, upnp, iptables, avahi, samba, usb storage and probably more stuff I forgot to mention.
-- Added the needed packages to use QoS script [cake-wg-pbr](https://github.com/lynxthecat/cake-wg-pbr)
-- Some compiler optimizations and build hardening options (cortex-a53+crc+crypto; LTO, MOLD, and more).
-- SSH configuration with strong algorithms and key exchange methods. Check the content of [`ssh_hardening.config`](files/etc/ssh/sshd_config.d/ssh_hardening.conf) and [`sshd_config`](files/etc/ssh/sshd_config).
-- Quality-of-life enhancements through UCI configuration. Check the content of [`999-QOL_config`](files/etc/uci-defaults/999-QOL_config).
-- Some debug and kernel stuff removed.
-- [`upgrade_custom_openwrt`](files/usr/bin/upgrade_custom_openwrt) script
+### Security Hardening
+- OpenSSH server (replaces Dropbear)
+- Strong SSH algorithms and key exchange methods
+- OpenSSL with modern ciphers only
+- Stack protection (STACKPROTECTOR_STRONG)
+- ASLR with PIE for all packages
+- FORTIFY_SOURCE_2
 
-Check the content of [`mt6000.config`](mt6000.config) for details.
+### Optimizations
+- Cortex-A53 CPU optimizations (cortex-a53+crc+crypto)
+- Link-Time Optimization (LTO)
+- BBR TCP congestion control
+- Disabled debugging features for smaller image
 
+### Custom Files
+- SSH hardening configuration: [`ssh_hardening.conf`](files/etc/ssh/sshd_config.d/ssh_hardening.conf)
+- Custom SSH daemon config: [`sshd_config`](files/etc/ssh/sshd_config)
+- Quality-of-life UCI defaults: [`999-QOL_config`](files/etc/uci-defaults/999-QOL_config)
+- Automated upgrade script: [`upgrade_custom_openwrt`](files/usr/bin/upgrade_custom_openwrt)
 
+### Removed Packages
+- odhcp, upnp, iptables (uses nftables)
+- avahi, samba, USB storage support
+- Debugging and kernel development features
+
+Check configuration files (`mt6000.config` or `wr3000.config`) for complete details.
+
+## 🛠️ Build Scripts
+
+### `setup.sh`
+Automated dependency installer that detects your Linux distribution:
+- Ubuntu/Debian
+- Fedora/RHEL/CentOS
+- Arch/Manjaro
+- openSUSE
+
+### `build_openwrt.sh`
+Interactive build script with menu:
+1. **Full automated build** - Complete one-click process
+2. Clone OpenWrt source
+3. Update feeds
+4. Copy config and files
+5. Expand configuration
+6. Download packages
+7. Build firmware
+8. Open menuconfig (customize)
+9. Clean build artifacts
+10. Show build results
+11. Check dependencies
+
+## 📋 Build Process
+
+The automated build will:
+1. ✅ Check system dependencies and disk space (10GB+ required)
+2. ✅ Clone OpenWrt source code
+3. ✅ Update and install feeds
+4. ✅ Copy custom configuration and files
+5. ✅ Download required packages
+6. ✅ Compile firmware (1-3 hours depending on system)
+7. ✅ Display firmware location
+
+## 📍 Output Location
+
+Firmware images will be in:
+```
+~/openwrt_build/openwrt/bin/targets/mediatek/filogic/
+```
+
+Files:
+- `*-sysupgrade.bin` - For upgrading existing OpenWrt
+- `*-factory.bin` - For initial installation from stock firmware
+
+## 🎨 Customization
+
+### Modify Build Configuration
+```bash
+./build_openwrt.sh
+# Select option 8: Open menuconfig
+```
+
+Changes are automatically saved back to the config file.
+
+### Add Custom Files
+Place files in `files/` directory matching router filesystem structure:
+```
+files/
+├── etc/
+│   └── config/
+└── usr/
+    └── bin/
+```
+
+## 📖 Detailed Documentation
+
+See [`BUILD_INSTRUCTIONS.md`](BUILD_INSTRUCTIONS.md) for comprehensive build guide.
+
+## 🤖 GitHub Actions Automation
+
+Automated CI builds live in `.github/workflows/build-openwrt.yaml` and cover both supported targets.
+
+### Triggers
+- `workflow_dispatch` (manual) with inputs for target selection and optional upstream override
+- `push` to `main` when configs, overlays, or workflow change
+- Nightly cron (`38 1 * * *`)
+
+### Runners
+- **GL-MT6000:** GitHub-hosted `ubuntu-24.04-arm`
+- **Cudy WR3000:** Self-hosted runner with labels `self-hosted`, `linux`, `x64`, `selfrunner`
+
+Ensure the self-runner has the OpenWrt build dependencies installed (`git`, `gcc/g++`, `make`, `flex`, `bison`, `gawk`, `rsync`, `python3`, `wget`, `unzip`, `swig`, `clang/llvm`, `libncurses-dev`, `libssl-dev`, `zlib1g-dev`).
+
+### What the workflow does
+1. Clones the selected upstream repository/branch (auto-detects the latest `next-*` branch for Flint 2)
+2. Restores cached `dl/` downloads (per-target)
+3. Applies this repo's `files/` overlay and config
+4. Runs `make download` + `make` with automatic serial fallback
+5. Uploads artifacts (sysupgrade/factory images, buildinfo, `.config`, and SHA256 sums)
+6. Creates per-target releases when triggered manually or via the schedule
+
+### Manual Dispatch Helper
+When starting a manual run, choose:
+- **target:** `all`, `gl-mt6000`, or `wr3000`
+- **remote_ref (optional):** set to a branch/tag/commit if you need to test a custom upstream revision
 
 ## About upgrade_custom_openwrt script
 
