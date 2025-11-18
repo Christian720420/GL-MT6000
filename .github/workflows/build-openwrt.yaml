@@ -41,20 +41,14 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.pretty }}
-    runs-on: ${{ fromJson(matrix.runner) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - id: wr3000
-            pretty: Cudy WR3000-v1
-            config_file: wr3000.config
-            remote_repository: openwrt/openwrt
-            remote_ref: main
-            release_prefix: wr3000
-            artifact_prefix: wr3000
-            runner: '["self-hosted","linux","x64","debian"]'
+    name: Build Cudy WR3000-v1
+    runs-on: self-hosted
+    env:
+      CONFIG_FILE: wr3000.config
+      REMOTE_REPOSITORY: openwrt/openwrt
+      REMOTE_REF: main
+      RELEASE_PREFIX: wr3000
+      ARTIFACT_PREFIX: wr3000
 
     steps:
       - name: Checkout builder repository
@@ -86,9 +80,9 @@ jobs:
         id: upstream
         run: |
           set -euo pipefail
-          REF="${{ matrix.remote_ref }}"
+          REF="${{ env.REMOTE_REF }}"
           if [ "$REF" = "auto-next" ]; then
-            REF=$(git ls-remote https://github.com/${{ matrix.remote_repository }}.git "refs/heads/next-*" \
+            REF=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" \
               | grep -vi 'test' \
               | awk '{print $2}' \
               | sed 's|refs/heads/||' \
@@ -102,8 +96,8 @@ jobs:
             echo "Unable to determine upstream ref" >&2
             exit 1
           fi
-          echo "Cloning OpenWrt from ${{ matrix.remote_repository }} (ref: $REF)"
-          git clone --depth=1 --filter=blob:none --single-branch --branch "$REF" https://github.com/${{ matrix.remote_repository }}.git openwrt
+          echo "Cloning OpenWrt from ${{ env.REMOTE_REPOSITORY }} (ref: $REF)"
+          git clone --depth=1 --filter=blob:none --single-branch --branch "$REF" https://github.com/${{ env.REMOTE_REPOSITORY }}.git openwrt
           cd openwrt
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -120,17 +114,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openwrt/dl
-          key: openwrt-dl-${{ matrix.id }}-${{ env.DL_CACHE_VERSION }}-${{ hashFiles(format('builder/{0}', matrix.config_file)) }}
+          key: openwrt-dl-wr3000-${{ env.DL_CACHE_VERSION }}-${{ hashFiles('builder/wr3000.config') }}
           restore-keys: |
-            openwrt-dl-${{ matrix.id }}-${{ env.DL_CACHE_VERSION }}-
+            openwrt-dl-wr3000-${{ env.DL_CACHE_VERSION }}-
 
       - name: Setup ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ matrix.id }}-${{ github.sha }}
+          key: ccache-wr3000-${{ github.sha }}
           restore-keys: |
-            ccache-${{ matrix.id }}-
+            ccache-wr3000-
 
       - name: Cache toolchain
         uses: actions/cache@v4
@@ -138,9 +132,9 @@ jobs:
           path: |
             openwrt/staging_dir/toolchain-*
             openwrt/build_dir/toolchain-*
-          key: toolchain-${{ matrix.id }}-${{ hashFiles(format('builder/{0}', matrix.config_file)) }}
+          key: toolchain-wr3000-${{ hashFiles('builder/wr3000.config') }}
           restore-keys: |
-            toolchain-${{ matrix.id }}-
+            toolchain-wr3000-
 
       - name: Prepare configuration and overlay
         run: |
@@ -151,7 +145,7 @@ jobs:
             sed -i "s|XXXXXX/XXXXXX|${{ github.repository }}|" ./files/usr/bin/upgrade_custom_openwrt || true
             chmod 755 ./files/usr/bin/upgrade_custom_openwrt
           fi
-          cp ../builder/${{ matrix.config_file }} .config
+          cp ../builder/${{ env.CONFIG_FILE }} .config
           echo "CONFIG_CCACHE=y" >> .config
           make defconfig
 
@@ -175,7 +169,7 @@ jobs:
       - name: Collect firmware artifacts
         run: |
           cd openwrt
-          ART_DIR="artifacts/${{ matrix.id }}"
+          ART_DIR="artifacts/wr3000"
           mkdir -p "$ART_DIR"
           cp .config "$ART_DIR/full.config"
           find bin -type f \( -name 'openwrt-*-sysupgrade.bin' -o -name 'openwrt-*-factory.bin' -o -name 'config.buildinfo' -o -name 'sha256sums' \) -exec cp {} "$ART_DIR" \; || true
@@ -188,23 +182,23 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_prefix }}-firmware
-          path: openwrt/artifacts/${{ matrix.id }}
+          name: ${{ env.ARTIFACT_PREFIX }}-firmware
+          path: openwrt/artifacts/wr3000
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
       - name: Prepare release notes
         id: meta
         run: |
-          tag="${{ matrix.release_prefix }}-$(date +%Y%m%d-%H%M)"
+          tag="${{ env.RELEASE_PREFIX }}-$(date +%Y%m%d-%H%M)"
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "release_name=${{ matrix.pretty }} firmware ($tag)" >> "$GITHUB_OUTPUT"
-          cat <<'EOF' > release-notes-${{ matrix.id }}.md
+          echo "release_name=Cudy WR3000-v1 firmware ($tag)" >> "$GITHUB_OUTPUT"
+          cat <<'EOF' > release-notes-wr3000.md
           ### Target
-          - Name: ${{ matrix.pretty }}
-          - Config: `${{ matrix.config_file }}`
+          - Name: Cudy WR3000-v1
+          - Config: `wr3000.config`
 
           ### Upstream
-          - Repository: https://github.com/${{ matrix.remote_repository }}
+          - Repository: https://github.com/${{ env.REMOTE_REPOSITORY }}
           - Ref: ${{ steps.upstream.outputs.ref }}
           - Commit: ${{ steps.upstream.outputs.commit }}
 
@@ -220,8 +214,8 @@ jobs:
           allowUpdates: true
           tag: ${{ steps.meta.outputs.release_tag }}
           name: ${{ steps.meta.outputs.release_name }}
-          bodyFile: release-notes-${{ matrix.id }}.md
-          artifacts: openwrt/artifacts/${{ matrix.id }}/*
+          bodyFile: release-notes-wr3000.md
+          artifacts: openwrt/artifacts/wr3000/*
           replacesArtifacts: true
           makeLatest: false
 
