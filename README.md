@@ -2,9 +2,8 @@
 
 This repository provides automated build scripts and configuration for creating custom OpenWrt firmware images for routers.
 
-## 🎯 Supported Devices
+## 🎯 Supported Device
 
-- **GL-MT6000 (GL.iNet Flint 2)** - Configuration: `mt6000.config`
 - **Cudy WR3000-v1** - Configuration: `wr3000.config`
 
 ## 🚀 Quick Start
@@ -60,7 +59,7 @@ Select **option 1** for fully automated build, or use individual menu options fo
 - avahi, samba, USB storage support
 - Debugging and kernel development features
 
-Check configuration files (`mt6000.config` or `wr3000.config`) for complete details.
+Check `wr3000.config` for complete details.
 
 ## 🛠️ Build Scripts
 
@@ -133,31 +132,28 @@ See [`BUILD_INSTRUCTIONS.md`](BUILD_INSTRUCTIONS.md) for comprehensive build gui
 
 ## 🤖 GitHub Actions Automation
 
-Automated CI builds live in `.github/workflows/build-openwrt.yaml` and cover both supported targets.
+Automated CI builds live in `.github/workflows/build-openwrt.yaml` and build the WR3000 target.
 
 ### Triggers
-- `workflow_dispatch` (manual) with inputs for target selection and optional upstream override
+- `workflow_dispatch` (manual) with optional upstream override
 - `push` to `main` when configs, overlays, or workflow change
 - Nightly cron (`38 1 * * *`)
 
 ### Runners
-- **GL-MT6000:** GitHub-hosted `ubuntu-24.04-arm`
-- **Cudy WR3000:** Self-hosted runner with labels `self-hosted`, `linux`, `x64`, `selfrunner`
+- **Cudy WR3000:** Self-hosted runner with labels `self-hosted`, `linux`, `x64`, `debian`
 
 Ensure the self-runner has the OpenWrt build dependencies installed (`git`, `gcc/g++`, `make`, `flex`, `bison`, `gawk`, `rsync`, `python3`, `wget`, `unzip`, `swig`, `clang/llvm`, `libncurses-dev`, `libssl-dev`, `zlib1g-dev`).
 
 ### What the workflow does
-1. Clones the selected upstream repository/branch (auto-detects the latest `next-*` branch for Flint 2)
-2. Restores cached `dl/` downloads (per-target)
+1. Clones the upstream OpenWrt repository/branch (defaults to `openwrt/openwrt@main`)
+2. Restores cached `dl/` downloads
 3. Applies this repo's `files/` overlay and config
 4. Runs `make download` + `make` with automatic serial fallback
 5. Uploads artifacts (sysupgrade/factory images, buildinfo, `.config`, and SHA256 sums)
-6. Creates per-target releases when triggered manually or via the schedule
+6. Creates releases when triggered manually or via the schedule
 
 ### Manual Dispatch Helper
-When starting a manual run, choose:
-- **target:** `all`, `gl-mt6000`, or `wr3000`
-- **remote_ref (optional):** set to a branch/tag/commit if you need to test a custom upstream revision
+When starting a manual run, you can optionally set `remote_ref` to test a custom upstream revision.
 
 ## About upgrade_custom_openwrt script
 

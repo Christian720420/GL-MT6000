@@ -21,7 +21,6 @@ on:
         type: choice
         options:
           - all
-          - gl-mt6000
           - wr3000
       remote_ref:
         description: "Override upstream ref (optional)"
@@ -48,14 +47,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - id: gl-mt6000
-            pretty: Flint 2 (GL-MT6000)
-            config_file: mt6000.config
-            remote_repository: pesa1234/openwrt
-            remote_ref: auto-next
-            release_prefix: gl-mt6000
-            artifact_prefix: gl-mt6000
-            runner: '["self-hosted","linux","x64","selfrunner"]'
           - id: wr3000
             pretty: Cudy WR3000-v1
             config_file: wr3000.config
@@ -63,7 +54,7 @@ jobs:
             remote_ref: main
             release_prefix: wr3000
             artifact_prefix: wr3000
-            runner: '["self-hosted","linux","x64","selfrunner"]'
+            runner: '["self-hosted","linux","x64","debian"]'
 
     steps:
       - name: Evaluate target filter
