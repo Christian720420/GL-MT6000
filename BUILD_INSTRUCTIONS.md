@@ -163,9 +163,9 @@ upgrade_custom_openwrt
 
 ## Custom Repository
 
-This configuration uses a custom package repository:
+This configuration uses the package repository hosted in this project:
 ```
-https://raw.githubusercontent.com/pesa1234/MT6000_cust_build/refs/heads/main
+https://raw.githubusercontent.com/Christian720420/GL-MT6000/main
 ```
 
 ## Notes
