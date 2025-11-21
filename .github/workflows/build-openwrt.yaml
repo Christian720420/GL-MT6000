@@ -1,4 +1,4 @@
-name: Build OpenWrt Targets
+name: Build OpenWrt for Cudy WR3000-v1
 
 permissions:
   contents: write
@@ -14,14 +14,6 @@ on:
       - ".github/workflows/build-openwrt.yaml"
   workflow_dispatch:
     inputs:
-      target:
-        description: "Which target to build"
-        required: false
-        default: all
-        type: choice
-        options:
-          - all
-          - wr3000
       remote_ref:
         description: "Override upstream ref (optional)"
         required: false
@@ -30,38 +22,37 @@ on:
     - cron: "38 1 * * *"
 
 concurrency:
-  group: openwrt-${{ github.workflow }}-${{ github.ref }}
+  group: openwrt-build-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  BUILDER_REPO: ${{ github.repository }}
   DL_CACHE_VERSION: v1
   ARTIFACT_RETENTION_DAYS: 10
-  GH_TOKEN: ${{ github.token }}
+  CONFIG_FILE: wr3000.config
+  REMOTE_REPOSITORY: openwrt/openwrt
+  REMOTE_REF: main
+  RELEASE_PREFIX: wr3000
+  ARTIFACT_PREFIX: wr3000
 
 jobs:
   build:
-    name: Build Cudy WR3000-v1
+    name: Build Cudy WR3000-v1 Firmware
     runs-on: self-hosted
-    env:
-      CONFIG_FILE: wr3000.config
-      REMOTE_REPOSITORY: openwrt/openwrt
-      REMOTE_REF: main
-      RELEASE_PREFIX: wr3000
-      ARTIFACT_PREFIX: wr3000
+    timeout-minutes: 480
 
     steps:
+      # ===================================
+      # 1. PREPARATION AND CLEANUP
+      # ===================================
+      
       - name: Cleanup workspace
         run: |
           echo "=== Workspace Cleanup ==="
           echo "Current directory: $PWD"
-          echo "Disk space before cleanup:"
           df -h . | tail -1
           
           # Remove old build artifacts but preserve caches
           rm -rf openwrt builder 2>/dev/null || true
-          
-          # Clean up any leftover lock files
           find . -name '*.lock' -delete 2>/dev/null || true
           
           echo "Disk space after cleanup:"
@@ -74,35 +65,46 @@ jobs:
 
       - name: Verify build dependencies
         run: |
-          echo "Checking build dependencies..."
+          echo "=== Checking Build Dependencies ==="
           missing=()
-          for cmd in git gcc g++ make gawk wget unzip python3 rsync flex bison swig; do
+          for cmd in git gcc g++ make gawk wget unzip python3 rsync flex bison swig ccache; do
             command -v $cmd >/dev/null || missing+=("$cmd")
           done
+          
           if [ ${#missing[@]} -gt 0 ]; then
             echo "Missing dependencies: ${missing[*]}"
             if command -v apt >/dev/null 2>&1; then
+              echo "Installing dependencies via apt..."
               sudo apt update -qq
-              sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
+              sudo apt install -y build-essential clang flex bison g++ gawk gettext \
+                libncurses-dev libssl-dev python3-setuptools rsync swig unzip \
+                zlib1g-dev file wget llvm ccache
             else
-              echo "::error::Missing dependencies and apt not available. Install manually."
+              echo "::error::Missing dependencies and apt not available"
               exit 1
             fi
           else
-            echo "All required dependencies present"
+            echo "✓ All required dependencies present"
           fi
 
+      # ===================================
+      # 2. FETCH OPENWRT SOURCE
+      # ===================================
+      
       - name: Fetch upstream OpenWrt source
         id: upstream
         run: |
           set -euo pipefail
           
-          # Clean up any existing openwrt directory from previous runs
+          echo "=== Fetching OpenWrt Source ==="
+          
+          # Clean up any existing directory
           if [ -d "openwrt" ]; then
             echo "Removing existing openwrt directory..."
             rm -rf openwrt
           fi
           
+          # Determine ref to clone
           REF="${{ env.REMOTE_REF }}"
           if [ "$REF" = "auto-next" ]; then
             REF=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" \
@@ -112,21 +114,34 @@ jobs:
               | sort -V \
               | tail -n1)
           fi
+          
+          # Allow override from workflow dispatch
           if [ -n "${{ github.event.inputs.remote_ref }}" ]; then
             REF="${{ github.event.inputs.remote_ref }}"
           fi
+          
           if [ -z "$REF" ]; then
-            echo "Unable to determine upstream ref" >&2
+            echo "::error::Unable to determine upstream ref"
             exit 1
           fi
+          
+          # Clone repository
           echo "Cloning OpenWrt from ${{ env.REMOTE_REPOSITORY }} (ref: $REF)"
-          git clone --depth=1 --filter=blob:none --single-branch --branch "$REF" https://github.com/${{ env.REMOTE_REPOSITORY }}.git openwrt
+          git clone --depth=1 --filter=blob:none --single-branch \
+            --branch "$REF" \
+            https://github.com/${{ env.REMOTE_REPOSITORY }}.git openwrt
+          
           cd openwrt
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "✓ OpenWrt source fetched: $(git rev-parse --short HEAD)"
 
-      - name: Cache feeds
+      # ===================================
+      # 3. RESTORE CACHES
+      # ===================================
+      
+      - name: Restore feeds cache
         uses: actions/cache@v4
         with:
           path: |
@@ -137,9 +152,41 @@ jobs:
             feeds-${{ hashFiles('openwrt/feeds.conf.default') }}-
             feeds-
 
+      - name: Restore downloads cache
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: openwrt-dl-${{ env.DL_CACHE_VERSION }}-${{ hashFiles('builder/wr3000.config') }}
+          restore-keys: |
+            openwrt-dl-${{ env.DL_CACHE_VERSION }}-
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-wr3000-${{ github.sha }}
+          restore-keys: |
+            ccache-wr3000-
+
+      - name: Restore toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/staging_dir/toolchain-*
+            openwrt/build_dir/toolchain-*
+          key: toolchain-wr3000-${{ hashFiles('builder/wr3000.config') }}
+          restore-keys: |
+            toolchain-wr3000-
+
+      # ===================================
+      # 4. UPDATE FEEDS
+      # ===================================
+      
       - name: Update and install feeds
         run: |
           cd openwrt
+          
+          echo "=== Updating Feeds ==="
           
           # Configure git for better reliability
           git config --global http.postBuffer 1048576000
@@ -148,26 +195,29 @@ jobs:
           git config --global core.compression 0
           git config --global protocol.version 2
           
-          # Check if feeds are already current
+          # Check if feeds are already current from cache
           if [ -f .feeds_updated ]; then
-            echo "Using cached feeds, doing quick update..."
-            ./scripts/feeds update -a || {
+            echo "Using cached feeds, attempting quick update..."
+            if ! ./scripts/feeds update -a; then
               echo "Cached feeds update failed, forcing fresh clone..."
               rm -rf feeds .feeds_updated
-            }
+            fi
           fi
           
           # Update feeds with robust retry logic
           if [ ! -f .feeds_updated ]; then
-            for i in {1..5}; do
-              echo "Attempt $i/5: Updating feeds..."
+            for attempt in {1..5}; do
+              echo "Attempt $attempt/5: Updating feeds..."
+              
               if timeout 600 ./scripts/feeds update -a; then
-                echo "Feeds updated successfully"
+                echo "✓ Feeds updated successfully"
                 touch .feeds_updated
                 break
               else
-                echo "Feed update failed (exit code: $?)"
-                if [ $i -lt 5 ]; then
+                EXIT_CODE=$?
+                echo "Feed update failed (exit code: $EXIT_CODE)"
+                
+                if [ $attempt -lt 5 ]; then
                   echo "Retrying in 15 seconds..."
                   sleep 15
                   # Clean up partial clones
@@ -180,88 +230,92 @@ jobs:
             done
           fi
           
-          # Install feeds with retries
-          for i in {1..2}; do
-            ./scripts/feeds install -a || {
-              if [ $i -eq 1 ]; then
-                echo "First feed install attempt failed, retrying..."
+          # Install feeds with retry
+          echo "=== Installing Feeds ==="
+          for attempt in {1..2}; do
+            if ./scripts/feeds install -a; then
+              echo "✓ Feeds installed successfully"
+              break
+            else
+              if [ $attempt -eq 1 ]; then
+                echo "First feed install failed, retrying..."
                 sleep 5
               else
                 echo "::error::Feed installation failed"
                 exit 1
               fi
-            }
+            fi
           done
 
-      - name: Restore downloads cache
-        uses: actions/cache@v4
-        with:
-          path: openwrt/dl
-          key: openwrt-dl-wr3000-${{ env.DL_CACHE_VERSION }}-${{ hashFiles('builder/wr3000.config') }}
-          restore-keys: |
-            openwrt-dl-wr3000-${{ env.DL_CACHE_VERSION }}-
-
-      - name: Setup ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-wr3000-${{ github.sha }}
-          restore-keys: |
-            ccache-wr3000-
-
-      - name: Cache toolchain
-        uses: actions/cache@v4
-        with:
-          path: |
-            openwrt/staging_dir/toolchain-*
-            openwrt/build_dir/toolchain-*
-          key: toolchain-wr3000-${{ hashFiles('builder/wr3000.config') }}
-          restore-keys: |
-            toolchain-wr3000-
-
+      # ===================================
+      # 5. PREPARE CONFIGURATION
+      # ===================================
+      
       - name: Prepare configuration and overlay
         run: |
           cd openwrt
+          
+          echo "=== Preparing Configuration ==="
+          
+          # Copy custom file overlay
           mkdir -p files
           cp -a ../builder/files/. ./files/
+          
+          # Update upgrade script with repository info
           if [ -f ./files/usr/bin/upgrade_custom_openwrt ]; then
             sed -i "s|XXXXXX/XXXXXX|${{ github.repository }}|" ./files/usr/bin/upgrade_custom_openwrt || true
             chmod 755 ./files/usr/bin/upgrade_custom_openwrt
+            echo "✓ Updated upgrade script"
           fi
+          
+          # Copy and expand configuration
           cp ../builder/${{ env.CONFIG_FILE }} .config
           echo "CONFIG_CCACHE=y" >> .config
+          
           make defconfig
+          
+          echo "✓ Configuration prepared"
 
+      # ===================================
+      # 6. DOWNLOAD SOURCES
+      # ===================================
+      
       - name: Download sources
         run: |
           cd openwrt
+          
+          echo "=== Downloading Sources ==="
+          
           CORES=$(nproc)
           DOWNLOAD_JOBS=$((CORES * 2))
-          echo "Downloading with $DOWNLOAD_JOBS parallel jobs ($(nproc) cores available)"
+          echo "Using $DOWNLOAD_JOBS parallel jobs ($CORES cores available)"
           
-          # First attempt with parallel downloads
+          # Attempt 1: Parallel with 2x cores
           if ! make download -j${DOWNLOAD_JOBS} V=s; then
-            echo "Parallel download failed, retrying with reduced parallelism..."
+            echo "::warning::Parallel download failed, retrying with reduced parallelism"
             sleep 5
             
-            # Second attempt with fewer jobs
+            # Attempt 2: Parallel with 1x cores
             if ! make download -j${CORES} V=s; then
-              echo "Reduced parallel download failed, trying sequential..."
+              echo "::warning::Reduced parallel download failed, trying sequential"
               sleep 10
               
-              # Final attempt sequentially
+              # Attempt 3: Sequential
               if ! make download -j1 V=sc; then
                 echo "::error::All download attempts failed"
-                echo "Attempting to identify missing packages..."
                 make download -j1 V=s 2>&1 | grep -E '(ERROR|Download failed)' || true
                 exit 1
               fi
             fi
           fi
           
-          echo "All sources downloaded successfully"
+          echo "✓ All sources downloaded"
           du -sh dl/ || true
 
+      # ===================================
+      # 7. BUILD FIRMWARE
+      # ===================================
+      
       - name: Build firmware
         env:
           CCACHE_DIR: ${{ github.workspace }}/../.ccache
@@ -269,15 +323,12 @@ jobs:
         run: |
           cd openwrt
           
-          # Pre-build checks
-          echo "=== Pre-build System Status ==="
-          echo "Available disk space:"
-          df -h . | tail -1
-          echo "Memory status:"
-          free -h || true
+          echo "=== Pre-build Status ==="
+          echo "Disk space:" && df -h . | tail -1
+          echo "Memory:" && free -h 2>/dev/null || true
           echo "CPU cores: $(nproc)"
           
-          # Check for minimum disk space (15GB)
+          # Check minimum disk space (15GB)
           AVAILABLE_KB=$(df --output=avail . | tail -1)
           if [ "$AVAILABLE_KB" -lt 15728640 ]; then
             echo "::warning::Low disk space: $(($AVAILABLE_KB / 1024 / 1024))GB available"
@@ -286,49 +337,53 @@ jobs:
           CORES=$(nproc)
           BUILD_JOBS=$((CORES + 1))
           
+          echo ""
           echo "=== Starting Build ==="
           echo "Build jobs: $BUILD_JOBS"
-          echo "CCACHE enabled at: $CCACHE_DIR"
+          echo "CCACHE: $CCACHE_DIR"
+          echo ""
           
-          # Parallel build with monitoring
+          # Attempt 1: Parallel build
           if ! make -j${BUILD_JOBS} V=w; then
-            echo "::warning::Parallel build failed, analyzing error..."
-            
-            # Check disk space
+            echo "::warning::Parallel build failed, analyzing error"
             df -h . | tail -1
             
-            # Clean build_dir to free space
-            echo "Cleaning temporary build files..."
+            # Free up space
+            echo "Cleaning temporary files..."
             rm -rf build_dir/target-*/root-* build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
             
-            # Retry with fewer jobs
+            # Attempt 2: Reduced parallelism
             echo "Retrying with $CORES jobs..."
             if ! make -j${CORES} V=w; then
-              echo "::error::Reduced parallel build failed, trying single-threaded verbose build"
+              echo "::error::Reduced parallel build failed, trying single-threaded"
               
-              # Final attempt with full verbosity for debugging
+              # Attempt 3: Single-threaded with full verbosity
               if ! make -j1 V=sc; then
                 echo "::error::Build failed completely"
-                echo "=== Last 100 lines of build output ==="
+                echo "=== Build Log Tail ==="
                 tail -100 logs/* 2>/dev/null || true
                 exit 1
               fi
             fi
           fi
           
+          echo ""
           echo "=== Build Complete ==="
-          echo "Final disk usage:"
-          df -h . | tail -1
-          echo "Build artifacts:"
-          du -sh bin/ 2>/dev/null || true
+          echo "Final disk:" && df -h . | tail -1
+          echo "Artifacts:" && du -sh bin/ 2>/dev/null || true
 
+      # ===================================
+      # 8. COLLECT ARTIFACTS
+      # ===================================
+      
       - name: Collect firmware artifacts
         run: |
           cd openwrt
+          
+          echo "=== Collecting Artifacts ==="
+          
           ART_DIR="artifacts/wr3000"
           mkdir -p "$ART_DIR"
-          
-          echo "=== Collecting Build Artifacts ==="
           
           # Copy configuration
           cp .config "$ART_DIR/full.config"
@@ -341,8 +396,7 @@ jobs:
           done < <(find bin -type f \( -name 'openwrt-*-sysupgrade.bin' -o -name 'openwrt-*-factory.bin' -o -name 'config.buildinfo' -o -name 'sha256sums' \) -print0)
           
           if [ $FIRMWARE_COUNT -eq 0 ]; then
-            echo "::error::No firmware files found in bin/ directory"
-            echo "Checking bin/ structure:"
+            echo "::error::No firmware files found"
             find bin -type f -name '*.bin' || true
             exit 1
           fi
@@ -353,24 +407,21 @@ jobs:
             echo "✓ Checksums generated"
           fi
           
-          # Create build summary
-          cat > \"$ART_DIR/build-info.txt\" <<'EOF'
-          === Build Information ===
-          EOF
-          echo \"Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')\" >> \"$ART_DIR/build-info.txt\"
-          echo \"Repository: ${{ github.repository }}\" >> \"$ART_DIR/build-info.txt\"
-          echo \"Commit: ${{ github.sha }}\" >> \"$ART_DIR/build-info.txt\"
-          echo \"Workflow: ${{ github.workflow }}\" >> \"$ART_DIR/build-info.txt\"
-          echo \"Runner: $(uname -n)\" >> \"$ART_DIR/build-info.txt\"
-          echo \"\" >> \"$ART_DIR/build-info.txt\"
-          echo \"=== Firmware Files ===\" >> \"$ART_DIR/build-info.txt\"
-          ls -lh \"$ART_DIR\"/*.bin >> \"$ART_DIR/build-info.txt\" 2>/dev/null || true
+          # Create build info
+          {
+            echo "=== Build Information ==="
+            echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Repository: ${{ github.repository }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Workflow: ${{ github.workflow }}"
+            echo "Runner: $(uname -n)"
+            echo ""
+            echo "=== Firmware Files ==="
+            ls -lh "$ART_DIR"/*.bin 2>/dev/null || true
+          } > "$ART_DIR/build-info.txt"
           
           echo "=== Artifacts Summary ==="
           cat "$ART_DIR/build-info.txt"
-          echo ""
-          echo "All artifacts:"
-          ls -lh "$ART_DIR"
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
@@ -379,25 +430,42 @@ jobs:
           path: openwrt/artifacts/wr3000
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
+      # ===================================
+      # 9. CREATE RELEASE
+      # ===================================
+      
       - name: Prepare release notes
         id: meta
         run: |
           tag="${{ env.RELEASE_PREFIX }}-$(date +%Y%m%d-%H%M)"
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
           echo "release_name=Cudy WR3000-v1 firmware ($tag)" >> "$GITHUB_OUTPUT"
-          cat <<'EOF' > release-notes-wr3000.md
-          ### Target
-          - Name: Cudy WR3000-v1
-          - Config: `wr3000.config`
-
-          ### Upstream
-          - Repository: https://github.com/${{ env.REMOTE_REPOSITORY }}
-          - Ref: ${{ steps.upstream.outputs.ref }}
-          - Commit: ${{ steps.upstream.outputs.commit }}
-
-          ### Notes
-          - Artifacts contain sysupgrade images, buildinfo, and `.config`
-          - Built from https://github.com/${{ github.repository }}
+          
+          cat > release-notes.md << 'EOF'
+          ### Target Device
+          - **Name:** Cudy WR3000-v1
+          - **Config:** `wr3000.config`
+          
+          ### Upstream Source
+          - **Repository:** https://github.com/${{ env.REMOTE_REPOSITORY }}
+          - **Ref:** ${{ steps.upstream.outputs.ref }}
+          - **Commit:** ${{ steps.upstream.outputs.commit }}
+          
+          ### Installation
+          - Use `*-factory.bin` for initial installation from stock firmware
+          - Use `*-sysupgrade.bin` for upgrading existing OpenWrt
+          
+          ### Features
+          - OpenSSH with hardened configuration
+          - WireGuard VPN support
+          - Policy-Based Routing (PBR)
+          - AdBlock Fast
+          - CAKE QoS support
+          - LuCI web interface with HTTPS
+          
+          ### Build Info
+          - Built from: https://github.com/${{ github.repository }}
+          - Commit: ${{ github.sha }}
           EOF
 
       - name: Publish release
@@ -407,39 +475,42 @@ jobs:
           allowUpdates: true
           tag: ${{ steps.meta.outputs.release_tag }}
           name: ${{ steps.meta.outputs.release_name }}
-          bodyFile: release-notes-wr3000.md
+          bodyFile: release-notes.md
           artifacts: openwrt/artifacts/wr3000/*
           replacesArtifacts: true
           makeLatest: false
 
+      # ===================================
+      # 10. CLEANUP
+      # ===================================
+      
       - name: Cleanup build directory
         if: always()
         run: |
-          echo "=== Cleaning up build artifacts ==="
+          echo "=== Cleanup ==="
           
-          if [ -d openwrt ]; then
-            cd openwrt
-            
-            echo "Disk usage before cleanup:"
-            df -h . | tail -1
-            
-            # Remove temporary build files but keep useful caches
-            echo "Removing temporary build artifacts..."
-            rm -rf build_dir/target-*/root-* 2>/dev/null || true
-            rm -rf build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
-            rm -rf tmp/ 2>/dev/null || true
-            rm -rf logs/ 2>/dev/null || true
-            
-            # Clean staging except toolchain (already cached separately)
-            find staging_dir -mindepth 1 -maxdepth 1 ! -name 'toolchain-*' -exec rm -rf {} + 2>/dev/null || true
-            
-            # Clean old package build dirs but keep dl/ cache
-            find build_dir/target-*/*/build_dir/ -type d -name 'ipkg-*' -exec rm -rf {} + 2>/dev/null || true
-            
-            echo "Disk usage after cleanup:"
-            df -h . | tail -1
-            
-            echo "Cleanup complete"
-          else
-            echo "OpenWrt directory not found, skipping cleanup"
+          if [ ! -d openwrt ]; then
+            echo "No openwrt directory to clean"
+            exit 0
           fi
+          
+          cd openwrt
+          
+          echo "Before cleanup:"
+          df -h . | tail -1
+          
+          # Remove temporary files but preserve caches
+          rm -rf build_dir/target-*/root-* 2>/dev/null || true
+          rm -rf build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
+          rm -rf tmp/ logs/ 2>/dev/null || true
+          
+          # Clean staging except toolchain (cached separately)
+          find staging_dir -mindepth 1 -maxdepth 1 ! -name 'toolchain-*' -exec rm -rf {} + 2>/dev/null || true
+          
+          # Clean package build dirs but keep dl/ cache
+          find build_dir -type d -name 'ipkg-*' -exec rm -rf {} + 2>/dev/null || true
+          
+          echo "After cleanup:"
+          df -h . | tail -1
+          
+          echo "✓ Cleanup complete"
