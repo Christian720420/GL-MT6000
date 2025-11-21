@@ -51,6 +51,22 @@ jobs:
       ARTIFACT_PREFIX: wr3000
 
     steps:
+      - name: Cleanup workspace
+        run: |
+          echo "=== Workspace Cleanup ==="
+          echo "Current directory: $PWD"
+          echo "Disk space before cleanup:"
+          df -h . | tail -1
+          
+          # Remove old build artifacts but preserve caches
+          rm -rf openwrt builder 2>/dev/null || true
+          
+          # Clean up any leftover lock files
+          find . -name '*.lock' -delete 2>/dev/null || true
+          
+          echo "Disk space after cleanup:"
+          df -h . | tail -1
+
       - name: Checkout builder repository
         uses: actions/checkout@v4
         with:
@@ -110,12 +126,72 @@ jobs:
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Cache feeds
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/feeds
+            openwrt/.feeds_updated
+          key: feeds-${{ hashFiles('openwrt/feeds.conf.default') }}-${{ github.sha }}
+          restore-keys: |
+            feeds-${{ hashFiles('openwrt/feeds.conf.default') }}-
+            feeds-
+
       - name: Update and install feeds
         run: |
           cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          ./scripts/feeds install -a
+          
+          # Configure git for better reliability
+          git config --global http.postBuffer 1048576000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 300
+          git config --global core.compression 0
+          git config --global protocol.version 2
+          
+          # Check if feeds are already current
+          if [ -f .feeds_updated ]; then
+            echo "Using cached feeds, doing quick update..."
+            ./scripts/feeds update -a || {
+              echo "Cached feeds update failed, forcing fresh clone..."
+              rm -rf feeds .feeds_updated
+            }
+          fi
+          
+          # Update feeds with robust retry logic
+          if [ ! -f .feeds_updated ]; then
+            for i in {1..5}; do
+              echo "Attempt $i/5: Updating feeds..."
+              if timeout 600 ./scripts/feeds update -a; then
+                echo "Feeds updated successfully"
+                touch .feeds_updated
+                break
+              else
+                echo "Feed update failed (exit code: $?)"
+                if [ $i -lt 5 ]; then
+                  echo "Retrying in 15 seconds..."
+                  sleep 15
+                  # Clean up partial clones
+                  find feeds -name '*.git/index.lock' -delete 2>/dev/null || true
+                else
+                  echo "::error::Failed to update feeds after 5 attempts"
+                  exit 1
+                fi
+              fi
+            done
+          fi
+          
+          # Install feeds with retries
+          for i in {1..2}; do
+            ./scripts/feeds install -a || {
+              if [ $i -eq 1 ]; then
+                echo "First feed install attempt failed, retrying..."
+                sleep 5
+              else
+                echo "::error::Feed installation failed"
+                exit 1
+              fi
+            }
+          done
 
       - name: Restore downloads cache
         uses: actions/cache@v4
@@ -159,31 +235,141 @@ jobs:
       - name: Download sources
         run: |
           cd openwrt
-          echo "Downloading with $(nproc) parallel jobs"
-          make download -j$(nproc) V=s || make download -j1 V=s
+          CORES=$(nproc)
+          DOWNLOAD_JOBS=$((CORES * 2))
+          echo "Downloading with $DOWNLOAD_JOBS parallel jobs ($(nproc) cores available)"
+          
+          # First attempt with parallel downloads
+          if ! make download -j${DOWNLOAD_JOBS} V=s; then
+            echo "Parallel download failed, retrying with reduced parallelism..."
+            sleep 5
+            
+            # Second attempt with fewer jobs
+            if ! make download -j${CORES} V=s; then
+              echo "Reduced parallel download failed, trying sequential..."
+              sleep 10
+              
+              # Final attempt sequentially
+              if ! make download -j1 V=sc; then
+                echo "::error::All download attempts failed"
+                echo "Attempting to identify missing packages..."
+                make download -j1 V=s 2>&1 | grep -E '(ERROR|Download failed)' || true
+                exit 1
+              fi
+            fi
+          fi
+          
+          echo "All sources downloaded successfully"
+          du -sh dl/ || true
 
       - name: Build firmware
         env:
           CCACHE_DIR: ${{ github.workspace }}/../.ccache
+          FORCE_UNSAFE_CONFIGURE: 1
         run: |
           cd openwrt
-          echo "Building with $(nproc) parallel jobs (ccache enabled)"
-          make -j$(($(nproc) + 1)) || {
-            echo "Build failed, retrying with verbose single-thread build"
-            make -j1 V=s
-          }
+          
+          # Pre-build checks
+          echo "=== Pre-build System Status ==="
+          echo "Available disk space:"
+          df -h . | tail -1
+          echo "Memory status:"
+          free -h || true
+          echo "CPU cores: $(nproc)"
+          
+          # Check for minimum disk space (15GB)
+          AVAILABLE_KB=$(df --output=avail . | tail -1)
+          if [ "$AVAILABLE_KB" -lt 15728640 ]; then
+            echo "::warning::Low disk space: $(($AVAILABLE_KB / 1024 / 1024))GB available"
+          fi
+          
+          CORES=$(nproc)
+          BUILD_JOBS=$((CORES + 1))
+          
+          echo "=== Starting Build ==="
+          echo "Build jobs: $BUILD_JOBS"
+          echo "CCACHE enabled at: $CCACHE_DIR"
+          
+          # Parallel build with monitoring
+          if ! make -j${BUILD_JOBS} V=w; then
+            echo "::warning::Parallel build failed, analyzing error..."
+            
+            # Check disk space
+            df -h . | tail -1
+            
+            # Clean build_dir to free space
+            echo "Cleaning temporary build files..."
+            rm -rf build_dir/target-*/root-* build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
+            
+            # Retry with fewer jobs
+            echo "Retrying with $CORES jobs..."
+            if ! make -j${CORES} V=w; then
+              echo "::error::Reduced parallel build failed, trying single-threaded verbose build"
+              
+              # Final attempt with full verbosity for debugging
+              if ! make -j1 V=sc; then
+                echo "::error::Build failed completely"
+                echo "=== Last 100 lines of build output ==="
+                tail -100 logs/* 2>/dev/null || true
+                exit 1
+              fi
+            fi
+          fi
+          
+          echo "=== Build Complete ==="
+          echo "Final disk usage:"
+          df -h . | tail -1
+          echo "Build artifacts:"
+          du -sh bin/ 2>/dev/null || true
 
       - name: Collect firmware artifacts
         run: |
           cd openwrt
           ART_DIR="artifacts/wr3000"
           mkdir -p "$ART_DIR"
+          
+          echo "=== Collecting Build Artifacts ==="
+          
+          # Copy configuration
           cp .config "$ART_DIR/full.config"
-          find bin -type f \( -name 'openwrt-*-sysupgrade.bin' -o -name 'openwrt-*-factory.bin' -o -name 'config.buildinfo' -o -name 'sha256sums' \) -exec cp {} "$ART_DIR" \; || true
+          
+          # Find and copy firmware files
+          FIRMWARE_COUNT=0
+          while IFS= read -r -d '' file; do
+            cp "$file" "$ART_DIR/"
+            FIRMWARE_COUNT=$((FIRMWARE_COUNT + 1))
+          done < <(find bin -type f \( -name 'openwrt-*-sysupgrade.bin' -o -name 'openwrt-*-factory.bin' -o -name 'config.buildinfo' -o -name 'sha256sums' \) -print0)
+          
+          if [ $FIRMWARE_COUNT -eq 0 ]; then
+            echo "::error::No firmware files found in bin/ directory"
+            echo "Checking bin/ structure:"
+            find bin -type f -name '*.bin' || true
+            exit 1
+          fi
+          
+          # Generate checksums
           if ls "$ART_DIR"/openwrt-*.bin >/dev/null 2>&1; then
             (cd "$ART_DIR" && sha256sum openwrt-*.bin > sha256sums.txt)
+            echo "✓ Checksums generated"
           fi
-          echo "Build artifacts collected:"
+          
+          # Create build summary
+          cat > \"$ART_DIR/build-info.txt\" <<'EOF'
+          === Build Information ===
+          EOF
+          echo \"Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')\" >> \"$ART_DIR/build-info.txt\"
+          echo \"Repository: ${{ github.repository }}\" >> \"$ART_DIR/build-info.txt\"
+          echo \"Commit: ${{ github.sha }}\" >> \"$ART_DIR/build-info.txt\"
+          echo \"Workflow: ${{ github.workflow }}\" >> \"$ART_DIR/build-info.txt\"
+          echo \"Runner: $(uname -n)\" >> \"$ART_DIR/build-info.txt\"
+          echo \"\" >> \"$ART_DIR/build-info.txt\"
+          echo \"=== Firmware Files ===\" >> \"$ART_DIR/build-info.txt\"
+          ls -lh \"$ART_DIR\"/*.bin >> \"$ART_DIR/build-info.txt\" 2>/dev/null || true
+          
+          echo "=== Artifacts Summary ==="
+          cat "$ART_DIR/build-info.txt"
+          echo ""
+          echo "All artifacts:"
           ls -lh "$ART_DIR"
 
       - name: Upload firmware artifact
@@ -229,7 +415,31 @@ jobs:
       - name: Cleanup build directory
         if: always()
         run: |
-          echo "Cleaning up build artifacts to save disk space"
-          cd openwrt || exit 0
-          rm -rf build_dir/target-* tmp/ || true
-          echo "Cleanup complete"
+          echo "=== Cleaning up build artifacts ==="
+          
+          if [ -d openwrt ]; then
+            cd openwrt
+            
+            echo "Disk usage before cleanup:"
+            df -h . | tail -1
+            
+            # Remove temporary build files but keep useful caches
+            echo "Removing temporary build artifacts..."
+            rm -rf build_dir/target-*/root-* 2>/dev/null || true
+            rm -rf build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
+            rm -rf tmp/ 2>/dev/null || true
+            rm -rf logs/ 2>/dev/null || true
+            
+            # Clean staging except toolchain (already cached separately)
+            find staging_dir -mindepth 1 -maxdepth 1 ! -name 'toolchain-*' -exec rm -rf {} + 2>/dev/null || true
+            
+            # Clean old package build dirs but keep dl/ cache
+            find build_dir/target-*/*/build_dir/ -type d -name 'ipkg-*' -exec rm -rf {} + 2>/dev/null || true
+            
+            echo "Disk usage after cleanup:"
+            df -h . | tail -1
+            
+            echo "Cleanup complete"
+          else
+            echo "OpenWrt directory not found, skipping cleanup"
+          fi
