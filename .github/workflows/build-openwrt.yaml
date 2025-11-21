@@ -80,6 +80,13 @@ jobs:
         id: upstream
         run: |
           set -euo pipefail
+          
+          # Clean up any existing openwrt directory from previous runs
+          if [ -d "openwrt" ]; then
+            echo "Removing existing openwrt directory..."
+            rm -rf openwrt
+          fi
+          
           REF="${{ env.REMOTE_REF }}"
           if [ "$REF" = "auto-next" ]; then
             REF=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" \
