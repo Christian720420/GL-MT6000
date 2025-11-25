@@ -1,516 +1,1076 @@
-name: Build OpenWrt for Cudy WR3000-v1
+# ══════════════════════════════════════════════════════════════════════════════
+# OpenWrt Firmware Builder - Cudy WR3000-v1
+# Advanced CI/CD Pipeline with Full Feature Set
+# ══════════════════════════════════════════════════════════════════════════════
+name: Build OpenWrt Firmware
 
-permissions:
-  contents: write
-  actions: read
-
+# ──────────────────────────────────────────────────────────────────────────────
+# WORKFLOW TRIGGERS
+# ──────────────────────────────────────────────────────────────────────────────
 on:
+  # Trigger on push to main branch (filtered by paths)
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - "*.config"
       - "files/**"
       - ".github/workflows/build-openwrt.yaml"
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+
+  # Trigger on pull requests (for testing)
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - "*.config"
+      - "files/**"
+
+  # Manual trigger with full options
   workflow_dispatch:
     inputs:
       remote_ref:
-        description: "Override upstream ref (optional)"
+        description: "Upstream branch/tag/commit"
+        type: string
+        default: "main"
         required: false
+      clean_build:
+        description: "Force clean build (ignore all caches)"
+        type: boolean
+        default: false
+        required: false
+      verbose:
+        description: "Enable verbose build output (V=s)"
+        type: boolean
+        default: false
+        required: false
+      single_thread:
+        description: "Force single-threaded build (debug)"
+        type: boolean
+        default: false
+        required: false
+      create_release:
+        description: "Create GitHub release"
+        type: boolean
+        default: true
+        required: false
+      release_type:
+        description: "Release type"
+        type: choice
+        options:
+          - "latest"
+          - "prerelease"
+          - "draft"
+        default: "latest"
+        required: false
+      extra_packages:
+        description: "Extra packages to include (space-separated)"
+        type: string
         default: ""
+        required: false
+      kernel_version:
+        description: "Override kernel version (leave empty for default)"
+        type: string
+        default: ""
+        required: false
+
+  # Scheduled builds
   schedule:
-    - cron: "38 1 * * *"
+    - cron: "38 1 * * *"      # Daily at 01:38 UTC
+    - cron: "0 12 * * 0"      # Weekly on Sunday at noon UTC
 
+  # Triggered by other workflows
+  workflow_call:
+    inputs:
+      remote_ref:
+        description: "Upstream ref to build"
+        type: string
+        default: "main"
+      config_file:
+        description: "Config file to use"
+        type: string
+        default: "wr3000.config"
+    outputs:
+      artifact_name:
+        description: "Name of uploaded artifact"
+        value: ${{ jobs.build.outputs.artifact_name }}
+      firmware_version:
+        description: "Built firmware version"
+        value: ${{ jobs.prepare.outputs.tag }}
+    secrets:
+      DEPLOY_KEY:
+        description: "Optional deploy key for private repos"
+        required: false
+
+  # Trigger on release events (for rebuild)
+  release:
+    types: [published, edited]
+
+  # Repository dispatch for external triggers
+  repository_dispatch:
+    types: [build-firmware, upstream-update]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONCURRENCY CONTROL
+# ──────────────────────────────────────────────────────────────────────────────
 concurrency:
-  group: openwrt-build-${{ github.ref }}
-  cancel-in-progress: false
+  group: openwrt-${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# ──────────────────────────────────────────────────────────────────────────────
+# PERMISSIONS (Principle of Least Privilege)
+# ──────────────────────────────────────────────────────────────────────────────
+permissions:
+  contents: write          # For creating releases
+  actions: read            # For reading workflow artifacts
+  packages: write          # For container registry (future)
+  pull-requests: write     # For PR comments
+  issues: write            # For issue comments
+  checks: write            # For status checks
+  statuses: write          # For commit statuses
+  deployments: write       # For deployments
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DEFAULT SETTINGS FOR ALL JOBS
+# ──────────────────────────────────────────────────────────────────────────────
+defaults:
+  run:
+    shell: bash
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GLOBAL CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
 env:
-  DL_CACHE_VERSION: v1
-  ARTIFACT_RETENTION_DAYS: 10
-  CONFIG_FILE: wr3000.config
-  REMOTE_REPOSITORY: openwrt/openwrt
-  REMOTE_REF: main
-  RELEASE_PREFIX: wr3000
-  ARTIFACT_PREFIX: wr3000
+  # Target configuration
+  DEVICE_NAME: "Cudy WR3000-v1"
+  DEVICE_ID: "cudy_wr3000-v1"
+  CONFIG_FILE: ${{ inputs.config_file || 'wr3000.config' }}
+  UPSTREAM_REPO: "openwrt/openwrt"
+  UPSTREAM_REF: "main"
+
+  # Cache configuration
+  CACHE_VERSION: "v3"
+  CACHE_SAVE_ALWAYS: true
+
+  # Build configuration
+  BUILD_TIMEOUT: 480
+  DOWNLOAD_TIMEOUT: 30
+  FEEDS_TIMEOUT: 15
+  JOBS_MULTIPLIER: 1
+
+  # Artifact configuration
+  ARTIFACT_RETENTION: 14
+  RELEASE_PREFIX: "wr3000"
+  COMPRESSION_LEVEL: 6
+
+  # ccache configuration
+  CCACHE_MAXSIZE: "10G"
+  CCACHE_COMPRESS: "true"
+  CCACHE_COMPRESSLEVEL: "6"
+  CCACHE_SLOPPINESS: "file_macro,time_macros,include_file_mtime"
+
+  # Git configuration
+  GIT_CLONE_DEPTH: 1
+  GIT_HTTP_POST_BUFFER: "524288000"
+  GIT_HTTP_LOW_SPEED_LIMIT: "1000"
+  GIT_HTTP_LOW_SPEED_TIME: "300"
+
+  # Retry configuration
+  MAX_RETRIES: 5
+  RETRY_DELAY: 10
+
+  # Feature flags
+  ENABLE_CCACHE: true
+  ENABLE_BUILD_LOG: true
+  ENABLE_KERNEL_DEBUG: false
+  ENABLE_PACKAGE_DEBUG: false
+
+  # Timezone
+  TZ: "UTC"
 
 jobs:
-  build:
-    name: Build Cudy WR3000-v1 Firmware
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 1: PREPARATION - Resolve refs, validate inputs, generate metadata
+  # ════════════════════════════════════════════════════════════════════════════
+  prepare:
+    name: 🔍 Prepare
     runs-on: self-hosted
-    timeout-minutes: 480
+    timeout-minutes: 10
+    
+    # Job outputs for downstream jobs
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      short: ${{ steps.resolve.outputs.short }}
+      tag: ${{ steps.meta.outputs.tag }}
+      date: ${{ steps.meta.outputs.date }}
+      timestamp: ${{ steps.meta.outputs.timestamp }}
+      cache_key: ${{ steps.meta.outputs.cache_key }}
+      should_release: ${{ steps.check.outputs.should_release }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+      is_draft: ${{ steps.check.outputs.is_draft }}
+      runner_arch: ${{ steps.system.outputs.arch }}
+      runner_os: ${{ steps.system.outputs.os }}
+
+    # Environment variables for this job
+    env:
+      BUILD_REF: ${{ inputs.remote_ref || 'main' }}
 
     steps:
-      # ===================================
-      # 1. PREPARATION AND CLEANUP
-      # ===================================
-      
-      - name: Cleanup workspace
+      - name: "🖥️ System information"
+        id: system
         run: |
-          echo "=== Workspace Cleanup ==="
-          echo "Current directory: $PWD"
-          df -h . | tail -1
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  System Information                                          "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Runner: ${{ runner.name }}"
+          echo "║  OS: ${{ runner.os }}"
+          echo "║  Arch: ${{ runner.arch }}"
+          echo "║  Event: ${{ github.event_name }}"
+          echo "║  Ref: ${{ github.ref }}"
+          echo "║  SHA: ${{ github.sha }}"
+          echo "║  Actor: ${{ github.actor }}"
+          echo "║  Workflow: ${{ github.workflow }}"
+          echo "║  Run ID: ${{ github.run_id }}"
+          echo "║  Run Number: ${{ github.run_number }}"
+          echo "║  Run Attempt: ${{ github.run_attempt }}"
+          echo "╚══════════════════════════════════════════════════════════════╝"
           
-          # Remove old build artifacts but preserve caches
-          rm -rf openwrt builder 2>/dev/null || true
-          find . -name '*.lock' -delete 2>/dev/null || true
-          
-          echo "Disk space after cleanup:"
-          df -h . | tail -1
+          echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
+          echo "os=$(uname -s)" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout builder repository
-        uses: actions/checkout@v4
-        with:
-          path: builder
-
-      - name: Verify build dependencies
+      - name: "📋 Generate build metadata"
+        id: meta
         run: |
-          echo "=== Checking Build Dependencies ==="
-          missing=()
-          for cmd in git gcc g++ make gawk wget unzip python3 rsync flex bison swig ccache; do
-            command -v $cmd >/dev/null || missing+=("$cmd")
-          done
+          DATE=$(date -u '+%Y-%m-%d')
+          TIMESTAMP=$(date -u '+%Y%m%d-%H%M%S')
+          TAG="${{ env.RELEASE_PREFIX }}-$(date +%Y%m%d-%H%M)"
+          CACHE_KEY="${{ env.CACHE_VERSION }}-$(date +%Y%m%d)"
           
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "Missing dependencies: ${missing[*]}"
-            if command -v apt >/dev/null 2>&1; then
-              echo "Installing dependencies via apt..."
-              sudo apt update -qq
-              sudo apt install -y build-essential clang flex bison g++ gawk gettext \
-                libncurses-dev libssl-dev python3-setuptools rsync swig unzip \
-                zlib1g-dev file wget llvm ccache
-            else
-              echo "::error::Missing dependencies and apt not available"
-              exit 1
-            fi
-          else
-            echo "✓ All required dependencies present"
-          fi
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$TIMESTAMP" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "cache_key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+          
+          # GitHub Actions step summary
+          echo "## 📋 Build Metadata" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Date | $DATE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | $TAG |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cache Key | $CACHE_KEY |" >> $GITHUB_STEP_SUMMARY
 
-      # ===================================
-      # 2. FETCH OPENWRT SOURCE
-      # ===================================
-      
-      - name: Fetch upstream OpenWrt source
-        id: upstream
+      - name: "🔎 Resolve upstream reference"
+        id: resolve
         run: |
-          set -euo pipefail
+          REF="${{ inputs.remote_ref || env.UPSTREAM_REF }}"
           
-          echo "=== Fetching OpenWrt Source ==="
+          echo "🔎 Resolving: $REF"
           
-          # Clean up any existing directory
-          if [ -d "openwrt" ]; then
-            echo "Removing existing openwrt directory..."
-            rm -rf openwrt
+          # Try as branch first
+          COMMIT=$(git ls-remote "https://github.com/${{ env.UPSTREAM_REPO }}.git" "refs/heads/$REF" | cut -f1)
+          
+          # Try as tag
+          [ -z "$COMMIT" ] && COMMIT=$(git ls-remote "https://github.com/${{ env.UPSTREAM_REPO }}.git" "refs/tags/$REF" | cut -f1)
+          
+          # Try as commit SHA (if length >= 7)
+          if [ -z "$COMMIT" ] && [ ${#REF} -ge 7 ]; then
+            COMMIT="$REF"
           fi
           
-          # Determine ref to clone
-          REF="${{ env.REMOTE_REF }}"
-          if [ "$REF" = "auto-next" ]; then
-            REF=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" \
-              | grep -vi 'test' \
-              | awk '{print $2}' \
-              | sed 's|refs/heads/||' \
-              | sort -V \
-              | tail -n1)
-          fi
-          
-          # Allow override from workflow dispatch
-          if [ -n "${{ github.event.inputs.remote_ref }}" ]; then
-            REF="${{ github.event.inputs.remote_ref }}"
-          fi
-          
-          if [ -z "$REF" ]; then
-            echo "::error::Unable to determine upstream ref"
+          if [ -z "$COMMIT" ]; then
+            echo "::error::Cannot resolve ref: $REF"
             exit 1
           fi
           
-          # Clone repository
-          echo "Cloning OpenWrt from ${{ env.REMOTE_REPOSITORY }} (ref: $REF)"
-          git clone --depth=1 --filter=blob:none --single-branch \
-            --branch "$REF" \
-            https://github.com/${{ env.REMOTE_REPOSITORY }}.git openwrt
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short=${COMMIT:0:7}" >> "$GITHUB_OUTPUT"
+          
+          echo "✅ Resolved: $REF → ${COMMIT:0:7}"
+          
+          # Add to step summary
+          echo "## 🔎 Upstream Reference" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ref:** \`$REF\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`$COMMIT\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: "✅ Check release conditions"
+        id: check
+        run: |
+          SHOULD_RELEASE="false"
+          IS_PRERELEASE="false"
+          IS_DRAFT="false"
+          
+          # Determine if we should create a release
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            SHOULD_RELEASE="true"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.create_release }}" = "true" ]; then
+              SHOULD_RELEASE="true"
+            fi
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            SHOULD_RELEASE="true"
+          fi
+          
+          # Check release type
+          if [ "${{ inputs.release_type }}" = "prerelease" ]; then
+            IS_PRERELEASE="true"
+          elif [ "${{ inputs.release_type }}" = "draft" ]; then
+            IS_DRAFT="true"
+          fi
+          
+          echo "should_release=$SHOULD_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "is_draft=$IS_DRAFT" >> "$GITHUB_OUTPUT"
+          
+          echo "📦 Release: $SHOULD_RELEASE (prerelease: $IS_PRERELEASE, draft: $IS_DRAFT)"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 2: BUILD - Main compilation job with full options
+  # ════════════════════════════════════════════════════════════════════════════
+  build:
+    name: 🔨 Build
+    runs-on: self-hosted
+    needs: prepare
+    timeout-minutes: 480
+    
+    # Continue on error for specific scenarios
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    
+    # Job outputs
+    outputs:
+      firmware_name: ${{ steps.collect.outputs.firmware_name }}
+      firmware_size: ${{ steps.collect.outputs.firmware_size }}
+      firmware_sha256: ${{ steps.collect.outputs.firmware_sha256 }}
+      artifact_name: ${{ steps.collect.outputs.artifact_name }}
+      build_duration: ${{ steps.timing.outputs.duration }}
+      cache_hit: ${{ steps.cache_status.outputs.hit }}
+
+    # Job-level environment
+    env:
+      UPSTREAM_REF: ${{ needs.prepare.outputs.ref }}
+      UPSTREAM_COMMIT: ${{ needs.prepare.outputs.commit }}
+      BUILD_DATE: ${{ needs.prepare.outputs.date }}
+      CACHE_KEY: ${{ needs.prepare.outputs.cache_key }}
+      CCACHE_DIR: ~/.ccache
+      CCACHE_MAXSIZE: "10G"
+      FORCE_UNSAFE_CONFIGURE: 1
+      TERM: xterm-256color
+
+    steps:
+      # ────────────────────────────────────────────────────────────────────────
+      # TIMING & SETUP
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "⏱️ Start build timer"
+        id: timer_start
+        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      - name: "📋 Build info"
+        run: |
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  OpenWrt Build: ${{ env.DEVICE_NAME }}"
+          echo "║  Date: ${{ needs.prepare.outputs.date }}"
+          echo "║  Upstream: ${{ env.UPSTREAM_REPO }}@${{ needs.prepare.outputs.short }}"
+          echo "║  Event: ${{ github.event_name }}"
+          echo "║  Clean Build: ${{ inputs.clean_build || 'false' }}"
+          echo "║  Verbose: ${{ inputs.verbose || 'false' }}"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+
+      - name: "🧹 Clean workspace"
+        run: |
+          # Aggressive cleanup
+          rm -rf openwrt builder 2>/dev/null || true
+          find . -maxdepth 1 -name "*.log" -delete 2>/dev/null || true
+          
+          # Show disk space
+          echo "💾 Disk space:"
+          df -h . | grep -v tmpfs
+          
+          # Show memory
+          echo "💻 Memory:"
+          free -h
+
+      - name: "📥 Checkout config"
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          fetch-depth: 0
+          submodules: recursive
+          lfs: false
+
+      - name: "🔧 Verify dependencies"
+        id: deps
+        run: |
+          REQUIRED="git gcc g++ make gawk wget unzip python3 rsync flex bison ccache"
+          MISSING=""
+          
+          for cmd in $REQUIRED; do
+            if ! command -v $cmd >/dev/null 2>&1; then
+              MISSING="$MISSING $cmd"
+            fi
+          done
+          
+          if [ -n "$MISSING" ]; then
+            echo "📦 Installing missing packages:$MISSING"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq \
+              build-essential clang flex bison g++ gawk \
+              gettext libncurses-dev libssl-dev python3-setuptools \
+              rsync swig unzip zlib1g-dev file wget llvm \
+              ccache libelf-dev python3-distutils python3-pyelftools \
+              qemu-utils device-tree-compiler
+          fi
+          
+          # Configure ccache
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --max-size=${{ env.CCACHE_MAXSIZE }}
+            ccache --set-config=compression=true
+            ccache --set-config=compression_level=6
+            ccache -z  # Zero stats
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ────────────────────────────────────────────────────────────────────────
+      # CLONE SOURCE
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "📦 Clone OpenWrt"
+        id: clone
+        run: |
+          echo "🔗 Cloning ${{ env.UPSTREAM_REPO }} @ ${{ needs.prepare.outputs.ref }}"
+          
+          # Configure git for large repos
+          git config --global http.postBuffer ${{ env.GIT_HTTP_POST_BUFFER }}
+          git config --global http.lowSpeedLimit ${{ env.GIT_HTTP_LOW_SPEED_LIMIT }}
+          git config --global http.lowSpeedTime ${{ env.GIT_HTTP_LOW_SPEED_TIME }}
+          git config --global core.compression 0
+          git config --global advice.detachedHead false
+          
+          # Clone with retry
+          for i in 1 2 3; do
+            if git clone --depth=${{ env.GIT_CLONE_DEPTH }} --single-branch \
+              --branch "${{ needs.prepare.outputs.ref }}" \
+              "https://github.com/${{ env.UPSTREAM_REPO }}.git" openwrt; then
+              break
+            fi
+            echo "⚠️ Clone attempt $i failed, retrying..."
+            rm -rf openwrt
+            sleep $((i * 5))
+          done
           
           cd openwrt
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "✓ OpenWrt source fetched: $(git rev-parse --short HEAD)"
+          echo "✅ $(git log -1 --format='%h %s')"
 
-      # ===================================
-      # 3. RESTORE CACHES
-      # ===================================
-      
-      - name: Restore feeds cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            openwrt/feeds
-            openwrt/.feeds_updated
-          key: feeds-${{ hashFiles('openwrt/feeds.conf.default') }}-${{ github.sha }}
-          restore-keys: |
-            feeds-${{ hashFiles('openwrt/feeds.conf.default') }}-
-            feeds-
-
-      - name: Restore downloads cache
-        uses: actions/cache@v4
-        with:
-          path: openwrt/dl
-          key: openwrt-dl-${{ env.DL_CACHE_VERSION }}-${{ hashFiles('builder/wr3000.config') }}
-          restore-keys: |
-            openwrt-dl-${{ env.DL_CACHE_VERSION }}-
-
-      - name: Restore ccache
+      # ────────────────────────────────────────────────────────────────────────
+      # CACHING (with save-always option)
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "💾 Restore ccache"
+        id: cache_ccache
+        if: ${{ !inputs.clean_build }}
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-wr3000-${{ github.sha }}
+          key: ccache-${{ env.DEVICE_ID }}-${{ needs.prepare.outputs.cache_key }}-${{ github.sha }}
           restore-keys: |
-            ccache-wr3000-
+            ccache-${{ env.DEVICE_ID }}-${{ needs.prepare.outputs.cache_key }}-
+            ccache-${{ env.DEVICE_ID }}-
+            ccache-
 
-      - name: Restore toolchain cache
+      - name: "💾 Restore downloads"
+        id: cache_dl
+        if: ${{ !inputs.clean_build }}
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ env.DEVICE_ID }}-${{ needs.prepare.outputs.cache_key }}-${{ hashFiles('builder/*.config') }}
+          restore-keys: |
+            dl-${{ env.DEVICE_ID }}-${{ needs.prepare.outputs.cache_key }}-
+            dl-${{ env.DEVICE_ID }}-
+            dl-
+
+      - name: "💾 Restore toolchain"
+        id: cache_toolchain
+        if: ${{ !inputs.clean_build }}
         uses: actions/cache@v4
         with:
           path: |
             openwrt/staging_dir/toolchain-*
+            openwrt/staging_dir/host
             openwrt/build_dir/toolchain-*
-          key: toolchain-wr3000-${{ hashFiles('builder/wr3000.config') }}
+            openwrt/build_dir/host
+          key: toolchain-${{ env.DEVICE_ID }}-${{ hashFiles('builder/*.config') }}-${{ needs.prepare.outputs.short }}
           restore-keys: |
-            toolchain-wr3000-
+            toolchain-${{ env.DEVICE_ID }}-${{ hashFiles('builder/*.config') }}-
+            toolchain-${{ env.DEVICE_ID }}-
 
-      # ===================================
-      # 4. UPDATE FEEDS
-      # ===================================
-      
-      - name: Update and install feeds
+      - name: "💾 Restore feeds"
+        id: cache_feeds
+        if: ${{ !inputs.clean_build }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/feeds
+            openwrt/package/feeds
+          key: feeds-${{ env.DEVICE_ID }}-${{ needs.prepare.outputs.cache_key }}-${{ github.sha }}
+          restore-keys: |
+            feeds-${{ env.DEVICE_ID }}-${{ needs.prepare.outputs.cache_key }}-
+            feeds-${{ env.DEVICE_ID }}-
+            feeds-
+
+      - name: "📊 Cache status"
+        id: cache_status
+        run: |
+          HIT="false"
+          if [ "${{ steps.cache_toolchain.outputs.cache-hit }}" = "true" ]; then
+            HIT="true"
+            echo "✅ Toolchain cache hit"
+          fi
+          if [ "${{ steps.cache_dl.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ Downloads cache hit"
+          fi
+          if [ "${{ steps.cache_ccache.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ ccache cache hit"
+          fi
+          if [ "${{ steps.cache_feeds.outputs.cache-hit }}" = "true" ]; then
+            echo "✅ Feeds cache hit"
+          fi
+          echo "hit=$HIT" >> "$GITHUB_OUTPUT"
+
+      # ────────────────────────────────────────────────────────────────────────
+      # FEEDS
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "📡 Update feeds"
+        id: feeds
+        timeout-minutes: ${{ fromJSON(env.FEEDS_TIMEOUT) }}
         run: |
           cd openwrt
           
-          echo "=== Updating Feeds ==="
+          echo "📡 Updating feeds..."
+          RETRY_COUNT=0
+          MAX_RETRIES=${{ env.MAX_RETRIES }}
           
-          # Configure git for better reliability
-          git config --global http.postBuffer 1048576000
-          git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 300
-          git config --global core.compression 0
-          git config --global protocol.version 2
-          
-          # Check if feeds are already current from cache
-          if [ -f .feeds_updated ]; then
-            echo "Using cached feeds, attempting quick update..."
-            if ! ./scripts/feeds update -a; then
-              echo "Cached feeds update failed, forcing fresh clone..."
-              rm -rf feeds .feeds_updated
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Attempt $RETRY_COUNT/$MAX_RETRIES..."
+            
+            if timeout 600 ./scripts/feeds update -a 2>&1; then
+              echo "✅ Feeds updated"
+              break
             fi
+            
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              DELAY=$((RETRY_COUNT * ${{ env.RETRY_DELAY }}))
+              echo "⚠️ Failed, retrying in ${DELAY}s..."
+              sleep $DELAY
+              
+              # Clean up locks
+              find feeds -name '*.lock' -delete 2>/dev/null || true
+              find feeds -name 'index.lock' -delete 2>/dev/null || true
+            else
+              echo "::error::Feeds update failed after $MAX_RETRIES attempts"
+              exit 1
+            fi
+          done
+          
+          # Install feeds (twice for dependencies)
+          ./scripts/feeds install -a
+          ./scripts/feeds install -a
+          echo "✅ Feeds installed"
+
+      # ────────────────────────────────────────────────────────────────────────
+      # CONFIGURATION
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "⚙️ Apply configuration"
+        id: config
+        run: |
+          cd openwrt
+          
+          # Copy overlay files
+          mkdir -p files
+          if [ -d ../builder/files ]; then
+            cp -a ../builder/files/. ./files/
+            echo "✅ Overlay files copied"
           fi
           
-          # Update feeds with robust retry logic
-          if [ ! -f .feeds_updated ]; then
-            for attempt in {1..5}; do
-              echo "Attempt $attempt/5: Updating feeds..."
-              
-              if timeout 600 ./scripts/feeds update -a; then
-                echo "✓ Feeds updated successfully"
-                touch .feeds_updated
-                break
-              else
-                EXIT_CODE=$?
-                echo "Feed update failed (exit code: $EXIT_CODE)"
-                
-                if [ $attempt -lt 5 ]; then
-                  echo "Retrying in 15 seconds..."
-                  sleep 15
-                  # Clean up partial clones
-                  find feeds -name '*.git/index.lock' -delete 2>/dev/null || true
-                else
-                  echo "::error::Failed to update feeds after 5 attempts"
-                  exit 1
-                fi
-              fi
+          # Patch upgrade script
+          if [ -f files/usr/bin/upgrade_custom_openwrt ]; then
+            sed -i "s|XXXXXX/XXXXXX|${{ github.repository }}|g" files/usr/bin/upgrade_custom_openwrt
+            chmod 755 files/usr/bin/upgrade_custom_openwrt
+          fi
+          
+          # Apply base config
+          cp ../builder/${{ env.CONFIG_FILE }} .config
+          
+          # Enable ccache
+          if [ "${{ env.ENABLE_CCACHE }}" = "true" ]; then
+            echo "CONFIG_CCACHE=y" >> .config
+          fi
+          
+          # Enable build logging
+          if [ "${{ env.ENABLE_BUILD_LOG }}" = "true" ]; then
+            echo "CONFIG_BUILD_LOG=y" >> .config
+          fi
+          
+          # Enable devel for ccache
+          echo "CONFIG_DEVEL=y" >> .config
+          
+          # Add extra packages if specified
+          if [ -n "${{ inputs.extra_packages }}" ]; then
+            echo "📦 Adding extra packages: ${{ inputs.extra_packages }}"
+            for pkg in ${{ inputs.extra_packages }}; do
+              echo "CONFIG_PACKAGE_${pkg}=y" >> .config
             done
           fi
           
-          # Install feeds with retry
-          echo "=== Installing Feeds ==="
-          for attempt in {1..2}; do
-            if ./scripts/feeds install -a; then
-              echo "✓ Feeds installed successfully"
-              break
-            else
-              if [ $attempt -eq 1 ]; then
-                echo "First feed install failed, retrying..."
-                sleep 5
-              else
-                echo "::error::Feed installation failed"
-                exit 1
-              fi
-            fi
-          done
-
-      # ===================================
-      # 5. PREPARE CONFIGURATION
-      # ===================================
-      
-      - name: Prepare configuration and overlay
-        run: |
-          cd openwrt
-          
-          echo "=== Preparing Configuration ==="
-          
-          # Copy custom file overlay
-          mkdir -p files
-          cp -a ../builder/files/. ./files/
-          
-          # Update upgrade script with repository info
-          if [ -f ./files/usr/bin/upgrade_custom_openwrt ]; then
-            sed -i "s|XXXXXX/XXXXXX|${{ github.repository }}|" ./files/usr/bin/upgrade_custom_openwrt || true
-            chmod 755 ./files/usr/bin/upgrade_custom_openwrt
-            echo "✓ Updated upgrade script"
+          # Override kernel version if specified
+          if [ -n "${{ inputs.kernel_version }}" ]; then
+            echo "🐧 Overriding kernel: ${{ inputs.kernel_version }}"
+            sed -i "s/CONFIG_LINUX_.*/CONFIG_LINUX_${{ inputs.kernel_version }}=y/" .config
           fi
           
-          # Copy and expand configuration
-          cp ../builder/${{ env.CONFIG_FILE }} .config
-          echo "CONFIG_CCACHE=y" >> .config
-          
+          # Expand config
           make defconfig
           
-          echo "✓ Configuration prepared"
+          # Show key config options
+          echo "📋 Key configuration:"
+          grep -E "^CONFIG_(TARGET_|PACKAGE_luci|KERNEL_)" .config | head -20 || true
+          
+          echo "✅ Configuration applied"
 
-      # ===================================
-      # 6. DOWNLOAD SOURCES
-      # ===================================
-      
-      - name: Download sources
+      # ────────────────────────────────────────────────────────────────────────
+      # DOWNLOAD
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "⬇️ Download packages"
+        id: download
+        timeout-minutes: ${{ fromJSON(env.DOWNLOAD_TIMEOUT) }}
         run: |
           cd openwrt
           
-          echo "=== Downloading Sources ==="
-          
           CORES=$(nproc)
-          DOWNLOAD_JOBS=$((CORES * 2))
-          echo "Using $DOWNLOAD_JOBS parallel jobs ($CORES cores available)"
+          JOBS=$((CORES * 2))
           
-          # Attempt 1: Parallel with 2x cores
-          if ! make download -j${DOWNLOAD_JOBS} V=s; then
-            echo "::warning::Parallel download failed, retrying with reduced parallelism"
-            sleep 5
+          echo "⬇️ Downloading with $JOBS parallel jobs..."
+          
+          # Try parallel first, fallback to sequential
+          if ! make download -j$JOBS IGNORE_ERRORS=1; then
+            echo "⚠️ Parallel download had issues, retrying..."
+            make download -j$CORES || make download -j1 V=s
+          fi
+          
+          # Verify downloads
+          MISSING=$(find dl -size 0 -type f 2>/dev/null | wc -l)
+          if [ "$MISSING" -gt 0 ]; then
+            echo "⚠️ Found $MISSING empty downloads, cleaning up..."
+            find dl -size 0 -type f -delete
+            make download -j4 V=s
+          fi
+          
+          echo "✅ Downloads: $(du -sh dl/ | cut -f1)"
+          echo "size=$(du -sh dl/ | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      # ────────────────────────────────────────────────────────────────────────
+      # BUILD
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "🔨 Compile firmware"
+        id: compile
+        run: |
+          cd openwrt
+          
+          # Determine job count
+          CORES=$(nproc)
+          if [ "${{ inputs.single_thread }}" = "true" ]; then
+            JOBS=1
+            echo "⚠️ Single-threaded build requested"
+          else
+            JOBS=$((CORES + 1))
+          fi
+          
+          # Determine verbosity
+          if [ "${{ inputs.verbose }}" = "true" ]; then
+            VERBOSE="V=s"
+          else
+            VERBOSE="V=w"
+          fi
+          
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  Starting Build                                              "
+          echo "║  Jobs: $JOBS | Verbose: $VERBOSE"
+          echo "║  Cores: $CORES | Memory: $(free -h | awk '/Mem:/ {print $2}')"
+          echo "║  Disk: $(df -h . | awk 'NR==2 {print $4}') available"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          
+          # Build with intelligent fallback
+          BUILD_SUCCESS="false"
+          
+          # Attempt 1: Full parallel
+          echo "🔨 Build attempt 1: -j$JOBS $VERBOSE"
+          if make -j$JOBS $VERBOSE 2>&1 | tee build.log; then
+            BUILD_SUCCESS="true"
+          else
+            echo "::warning::Parallel build failed"
             
-            # Attempt 2: Parallel with 1x cores
-            if ! make download -j${CORES} V=s; then
-              echo "::warning::Reduced parallel download failed, trying sequential"
-              sleep 10
+            # Free space
+            rm -rf build_dir/target-*/root-* tmp/ 2>/dev/null || true
+            
+            # Attempt 2: Half parallel
+            HALF_JOBS=$((JOBS / 2))
+            [ $HALF_JOBS -lt 1 ] && HALF_JOBS=1
+            echo "🔨 Build attempt 2: -j$HALF_JOBS $VERBOSE"
+            
+            if make -j$HALF_JOBS $VERBOSE 2>&1 | tee -a build.log; then
+              BUILD_SUCCESS="true"
+            else
+              echo "::warning::Reduced parallel build failed"
               
-              # Attempt 3: Sequential
-              if ! make download -j1 V=sc; then
-                echo "::error::All download attempts failed"
-                make download -j1 V=s 2>&1 | grep -E '(ERROR|Download failed)' || true
-                exit 1
+              # Attempt 3: Single thread with full verbosity
+              echo "🔨 Build attempt 3: -j1 V=s"
+              if make -j1 V=s 2>&1 | tee -a build.log; then
+                BUILD_SUCCESS="true"
               fi
             fi
           fi
           
-          echo "✓ All sources downloaded"
-          du -sh dl/ || true
-
-      # ===================================
-      # 7. BUILD FIRMWARE
-      # ===================================
-      
-      - name: Build firmware
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/../.ccache
-          FORCE_UNSAFE_CONFIGURE: 1
-        run: |
-          cd openwrt
-          
-          echo "=== Pre-build Status ==="
-          echo "Disk space:" && df -h . | tail -1
-          echo "Memory:" && free -h 2>/dev/null || true
-          echo "CPU cores: $(nproc)"
-          
-          # Check minimum disk space (15GB)
-          AVAILABLE_KB=$(df --output=avail . | tail -1)
-          if [ "$AVAILABLE_KB" -lt 15728640 ]; then
-            echo "::warning::Low disk space: $(($AVAILABLE_KB / 1024 / 1024))GB available"
-          fi
-          
-          CORES=$(nproc)
-          BUILD_JOBS=$((CORES + 1))
-          
-          echo ""
-          echo "=== Starting Build ==="
-          echo "Build jobs: $BUILD_JOBS"
-          echo "CCACHE: $CCACHE_DIR"
-          echo ""
-          
-          # Attempt 1: Parallel build
-          if ! make -j${BUILD_JOBS} V=w; then
-            echo "::warning::Parallel build failed, analyzing error"
-            df -h . | tail -1
+          if [ "$BUILD_SUCCESS" = "false" ]; then
+            echo "::error::Build failed after all attempts"
             
-            # Free up space
-            echo "Cleaning temporary files..."
-            rm -rf build_dir/target-*/root-* build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
+            # Show last errors
+            echo "=== Last 50 lines of build log ==="
+            tail -50 build.log || true
             
-            # Attempt 2: Reduced parallelism
-            echo "Retrying with $CORES jobs..."
-            if ! make -j${CORES} V=w; then
-              echo "::error::Reduced parallel build failed, trying single-threaded"
-              
-              # Attempt 3: Single-threaded with full verbosity
-              if ! make -j1 V=sc; then
-                echo "::error::Build failed completely"
-                echo "=== Build Log Tail ==="
-                tail -100 logs/* 2>/dev/null || true
-                exit 1
-              fi
-            fi
-          fi
-          
-          echo ""
-          echo "=== Build Complete ==="
-          echo "Final disk:" && df -h . | tail -1
-          echo "Artifacts:" && du -sh bin/ 2>/dev/null || true
-
-      # ===================================
-      # 8. COLLECT ARTIFACTS
-      # ===================================
-      
-      - name: Collect firmware artifacts
-        run: |
-          cd openwrt
-          
-          echo "=== Collecting Artifacts ==="
-          
-          ART_DIR="artifacts/wr3000"
-          mkdir -p "$ART_DIR"
-          
-          # Copy configuration
-          cp .config "$ART_DIR/full.config"
-          
-          # Find and copy firmware files
-          FIRMWARE_COUNT=0
-          while IFS= read -r -d '' file; do
-            cp "$file" "$ART_DIR/"
-            FIRMWARE_COUNT=$((FIRMWARE_COUNT + 1))
-          done < <(find bin -type f \( -name 'openwrt-*-sysupgrade.bin' -o -name 'openwrt-*-factory.bin' -o -name 'config.buildinfo' -o -name 'sha256sums' \) -print0)
-          
-          if [ $FIRMWARE_COUNT -eq 0 ]; then
-            echo "::error::No firmware files found"
-            find bin -type f -name '*.bin' || true
+            # Show any error logs
+            echo "=== Error logs ==="
+            find logs -name "*.txt" -exec tail -20 {} \; 2>/dev/null || true
+            
             exit 1
           fi
           
-          # Generate checksums
-          if ls "$ART_DIR"/openwrt-*.bin >/dev/null 2>&1; then
-            (cd "$ART_DIR" && sha256sum openwrt-*.bin > sha256sums.txt)
-            echo "✓ Checksums generated"
-          fi
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  ✅ BUILD SUCCESSFUL                                         "
+          echo "╚══════════════════════════════════════════════════════════════╝"
           
-          # Create build info
-          {
-            echo "=== Build Information ==="
-            echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "Repository: ${{ github.repository }}"
-            echo "Commit: ${{ github.sha }}"
-            echo "Workflow: ${{ github.workflow }}"
-            echo "Runner: $(uname -n)"
+          # Show ccache stats
+          if command -v ccache >/dev/null 2>&1; then
             echo ""
-            echo "=== Firmware Files ==="
-            ls -lh "$ART_DIR"/*.bin 2>/dev/null || true
-          } > "$ART_DIR/build-info.txt"
-          
-          echo "=== Artifacts Summary ==="
-          cat "$ART_DIR/build-info.txt"
-
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_PREFIX }}-firmware
-          path: openwrt/artifacts/wr3000
-          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
-
-      # ===================================
-      # 9. CREATE RELEASE
-      # ===================================
-      
-      - name: Prepare release notes
-        id: meta
-        run: |
-          tag="${{ env.RELEASE_PREFIX }}-$(date +%Y%m%d-%H%M)"
-          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "release_name=Cudy WR3000-v1 firmware ($tag)" >> "$GITHUB_OUTPUT"
-          
-          cat > release-notes.md << 'EOF'
-          ### Target Device
-          - **Name:** Cudy WR3000-v1
-          - **Config:** `wr3000.config`
-          
-          ### Upstream Source
-          - **Repository:** https://github.com/${{ env.REMOTE_REPOSITORY }}
-          - **Ref:** ${{ steps.upstream.outputs.ref }}
-          - **Commit:** ${{ steps.upstream.outputs.commit }}
-          
-          ### Installation
-          - Use `*-factory.bin` for initial installation from stock firmware
-          - Use `*-sysupgrade.bin` for upgrading existing OpenWrt
-          
-          ### Features
-          - OpenSSH with hardened configuration
-          - WireGuard VPN support
-          - Policy-Based Routing (PBR)
-          - AdBlock Fast
-          - CAKE QoS support
-          - LuCI web interface with HTTPS
-          
-          ### Build Info
-          - Built from: https://github.com/${{ github.repository }}
-          - Commit: ${{ github.sha }}
-          EOF
-
-      - name: Publish release
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        uses: ncipollo/release-action@v1
-        with:
-          allowUpdates: true
-          tag: ${{ steps.meta.outputs.release_tag }}
-          name: ${{ steps.meta.outputs.release_name }}
-          bodyFile: release-notes.md
-          artifacts: openwrt/artifacts/wr3000/*
-          replacesArtifacts: true
-          makeLatest: false
-
-      # ===================================
-      # 10. CLEANUP
-      # ===================================
-      
-      - name: Cleanup build directory
-        if: always()
-        run: |
-          echo "=== Cleanup ==="
-          
-          if [ ! -d openwrt ]; then
-            echo "No openwrt directory to clean"
-            exit 0
+            echo "📊 ccache statistics:"
+            ccache -s | head -10
           fi
           
+          echo "success=true" >> "$GITHUB_OUTPUT"
+
+      # ────────────────────────────────────────────────────────────────────────
+      # ARTIFACTS
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "📦 Collect artifacts"
+        id: collect
+        run: |
           cd openwrt
           
-          echo "Before cleanup:"
-          df -h . | tail -1
+          OUTDIR="output"
+          mkdir -p "$OUTDIR"
           
-          # Remove temporary files but preserve caches
-          rm -rf build_dir/target-*/root-* 2>/dev/null || true
-          rm -rf build_dir/target-*/linux-*/tmp/ 2>/dev/null || true
-          rm -rf tmp/ logs/ 2>/dev/null || true
+          # Collect firmware files
+          find bin/targets -type f \( \
+            -name '*-sysupgrade.bin' -o \
+            -name '*-factory.bin' -o \
+            -name '*-initramfs-kernel.bin' -o \
+            -name '*.img.gz' -o \
+            -name '*.manifest' -o \
+            -name 'sha256sums' -o \
+            -name 'config.buildinfo' -o \
+            -name 'feeds.buildinfo' -o \
+            -name 'version.buildinfo' \
+          \) -exec cp {} "$OUTDIR/" \;
           
-          # Clean staging except toolchain (cached separately)
-          find staging_dir -mindepth 1 -maxdepth 1 ! -name 'toolchain-*' -exec rm -rf {} + 2>/dev/null || true
+          # Copy build config
+          cp .config "$OUTDIR/full.config"
+          ./scripts/diffconfig.sh > "$OUTDIR/diffconfig" 2>/dev/null || true
           
-          # Clean package build dirs but keep dl/ cache
-          find build_dir -type d -name 'ipkg-*' -exec rm -rf {} + 2>/dev/null || true
+          # Generate checksums
+          (cd "$OUTDIR" && sha256sum *.bin 2>/dev/null > sha256sums.txt) || true
           
-          echo "After cleanup:"
-          df -h . | tail -1
+          # Get firmware info
+          SYSUPGRADE=$(ls "$OUTDIR"/*-sysupgrade.bin 2>/dev/null | head -1 || echo "")
+          if [ -n "$SYSUPGRADE" ]; then
+            FIRMWARE_NAME=$(basename "$SYSUPGRADE")
+            FIRMWARE_SIZE=$(du -h "$SYSUPGRADE" | cut -f1)
+            FIRMWARE_SHA256=$(sha256sum "$SYSUPGRADE" | cut -d' ' -f1)
+          else
+            FIRMWARE_NAME=""
+            FIRMWARE_SIZE="0"
+            FIRMWARE_SHA256=""
+          fi
           
-          echo "✓ Cleanup complete"
+          ARTIFACT_NAME="${{ env.RELEASE_PREFIX }}-${{ needs.prepare.outputs.date }}-${{ needs.prepare.outputs.short }}"
+          
+          # Create build info
+          cat > "$OUTDIR/BUILD_INFO.json" << EOF
+          {
+            "device": "${{ env.DEVICE_NAME }}",
+            "device_id": "${{ env.DEVICE_ID }}",
+            "date": "${{ needs.prepare.outputs.date }}",
+            "timestamp": "${{ needs.prepare.outputs.timestamp }}",
+            "upstream_repo": "${{ env.UPSTREAM_REPO }}",
+            "upstream_ref": "${{ needs.prepare.outputs.ref }}",
+            "upstream_commit": "${{ needs.prepare.outputs.commit }}",
+            "builder_repo": "${{ github.repository }}",
+            "builder_commit": "${{ github.sha }}",
+            "workflow_run": "${{ github.run_id }}",
+            "firmware_name": "$FIRMWARE_NAME",
+            "firmware_size": "$FIRMWARE_SIZE",
+            "firmware_sha256": "$FIRMWARE_SHA256"
+          }
+          EOF
+          
+          # Markdown build info
+          cat > "$OUTDIR/BUILD_INFO.md" << EOF
+          # Build Information
+          
+          | Field | Value |
+          |-------|-------|
+          | Device | ${{ env.DEVICE_NAME }} |
+          | Date | ${{ needs.prepare.outputs.date }} |
+          | Upstream | ${{ env.UPSTREAM_REPO }}@${{ needs.prepare.outputs.short }} |
+          | Firmware | $FIRMWARE_NAME |
+          | Size | $FIRMWARE_SIZE |
+          | SHA256 | \`${FIRMWARE_SHA256:0:16}...\` |
+          | Workflow | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          EOF
+          
+          echo "firmware_name=$FIRMWARE_NAME" >> "$GITHUB_OUTPUT"
+          echo "firmware_size=$FIRMWARE_SIZE" >> "$GITHUB_OUTPUT"
+          echo "firmware_sha256=$FIRMWARE_SHA256" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          
+          echo ""
+          echo "📦 Artifacts collected:"
+          ls -lh "$OUTDIR"
+          
+          # Add to step summary
+          echo "## 📦 Build Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Size |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          ls -lh "$OUTDIR"/*.bin 2>/dev/null | awk '{print "| " $NF " | " $5 " |"}' >> $GITHUB_STEP_SUMMARY || true
+
+      - name: "☁️ Upload firmware"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.artifact_name }}
+          path: openwrt/output/
+          retention-days: ${{ env.ARTIFACT_RETENTION }}
+          compression-level: ${{ env.COMPRESSION_LEVEL }}
+          if-no-files-found: error
+          overwrite: true
+
+      - name: "☁️ Upload build logs"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ needs.prepare.outputs.date }}
+          path: |
+            openwrt/logs/
+            openwrt/build.log
+          retention-days: 7
+          compression-level: 9
+          if-no-files-found: ignore
+          overwrite: true
+
+      # ────────────────────────────────────────────────────────────────────────
+      # TIMING & CLEANUP
+      # ────────────────────────────────────────────────────────────────────────
+      - name: "⏱️ Calculate build duration"
+        id: timing
+        if: always()
+        run: |
+          START=${{ steps.timer_start.outputs.start }}
+          END=$(date +%s)
+          DURATION=$((END - START))
+          HOURS=$((DURATION / 3600))
+          MINUTES=$(((DURATION % 3600) / 60))
+          SECONDS=$((DURATION % 60))
+          
+          FORMATTED="${HOURS}h ${MINUTES}m ${SECONDS}s"
+          echo "duration=$FORMATTED" >> "$GITHUB_OUTPUT"
+          
+          echo "⏱️ Build duration: $FORMATTED"
+          
+          # Add to summary
+          echo "## ⏱️ Build Timing" >> $GITHUB_STEP_SUMMARY
+          echo "- **Duration:** $FORMATTED" >> $GITHUB_STEP_SUMMARY
+
+      - name: "🧹 Cleanup"
+        if: always()
+        run: |
+          if [ -d openwrt ]; then
+            cd openwrt
+            # Remove large temporary files but keep caches
+            rm -rf build_dir/target-*/root-* tmp/ 2>/dev/null || true
+            rm -rf build_dir/target-*/linux-*/linux-*/ 2>/dev/null || true
+            echo "💾 Disk after cleanup: $(df -h . | awk 'NR==2 {print $4}')"
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 3: RELEASE - Publish to GitHub Releases with full options
+  # ════════════════════════════════════════════════════════════════════════════
+  release:
+    name: 🚀 Release
+    runs-on: self-hosted
+    needs: [prepare, build]
+    timeout-minutes: 30
+    
+    # Only run if should_release is true
+    if: needs.prepare.outputs.should_release == 'true'
+    
+    # Job outputs
+    outputs:
+      release_url: ${{ steps.create_release.outputs.html_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+
+    steps:
+      - name: "📥 Download artifacts"
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release/
+
+      - name: "📋 Prepare release notes"
+        id: notes
+        run: |
+          cat > release-notes.md << 'RELEASE_EOF'
+          ## OpenWrt Firmware for ${{ env.DEVICE_NAME }}
+          
+          ### 📦 Source Information
+          | | |
+          |---|---|
+          | **Upstream** | [${{ env.UPSTREAM_REPO }}](https://github.com/${{ env.UPSTREAM_REPO }}) |
+          | **Branch** | `${{ needs.prepare.outputs.ref }}` |
+          | **Commit** | [`${{ needs.prepare.outputs.short }}`](https://github.com/${{ env.UPSTREAM_REPO }}/commit/${{ needs.prepare.outputs.commit }}) |
+          | **Build Date** | ${{ needs.prepare.outputs.date }} |
+          | **Build Time** | ${{ needs.build.outputs.build_duration }} |
+          
+          ### 📥 Installation Guide
+          | File | Description | Use Case |
+          |------|-------------|----------|
+          | `*-factory.bin` | Factory image | First install from stock firmware via web UI |
+          | `*-sysupgrade.bin` | Sysupgrade image | Upgrade existing OpenWrt via LuCI or CLI |
+          
+          ### ✨ Included Features
+          - 🔐 **OpenSSH** - Hardened SSH server (replaces Dropbear)
+          - 🔒 **WireGuard** - Modern VPN protocol
+          - 🛣️ **PBR** - Policy-Based Routing
+          - 🚫 **AdBlock Fast** - Lightweight ad blocking
+          - 📊 **CAKE QoS** - Smart queue management
+          - 🌐 **LuCI** - Web interface with HTTPS support
+          - 🔧 **Custom scripts** - Easy upgrade and configuration
+          
+          ### 🔒 Security Hardening
+          - Stack protector (strong)
+          - PIE executables
+          - FORTIFY_SOURCE level 2
+          - ASLR enabled
+          - Secure SSH configuration
+          
+          ### ⚡ Performance Optimizations
+          - Cortex-A53 CPU tuning
+          - LTO (Link-Time Optimization)
+          - ccache compilation
+          
+          ### 📊 Build Information
+          | | |
+          |---|---|
+          | **Firmware** | `${{ needs.build.outputs.firmware_name }}` |
+          | **Size** | ${{ needs.build.outputs.firmware_size }} |
+          | **SHA256** | `${{ needs.build.outputs.firmware_sha256 }}` |
+          | **Cache Hit** | ${{ needs.build.outputs.cache_hit }} |
+          | **Workflow Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          
+          ---
+          
+          <details>
+          <summary>📋 Full Changelog</summary>
+          
+          See [upstream commits](https://github.com/${{ env.UPSTREAM_REPO }}/commits/${{ needs.prepare.outputs.ref }}) for changes.
+          
+          </details>
+          
+          ---
+          *Built automatically by [GitHub Actions](${{ github.server_url }}/${{ github.repository }}/actions) • [Report Issues](${{ github.server_url }}/${{ github.repository }}/issues)*
+          RELEASE_EOF
+
+      - name: "🚀 Create GitHub Release"
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.prepare.outputs.tag }}
+          name: "${{ env.DEVICE_NAME }} - ${{ needs.prepare.outputs.date }}"
+          bodyFile: release-notes.md
+          artifacts: release/*
+          artifactErrorsFailBuild: false
+          makeLatest: ${{ needs.prepare.outputs.is_prerelease != 'true' && needs.prepare.outputs.is_draft != 'true' }}
+          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+          draft: ${{ needs.prepare.outputs.is_draft == 'true' }}
+          allowUpdates: true
+          removeArtifacts: false
+          replacesArtifacts: true
+          generateReleaseNotes: false
+          skipIfReleaseExists: false
+          updateOnlyUnreleased: false
+          omitBodyDuringUpdate: false
+          omitNameDuringUpdate: false
+          omitPrereleaseDuringUpdate: false
+          omitDraftDuringUpdate: false
+
+      - name: "📢 Post release summary"
+        run: |
+          echo "## 🚀 Release Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** \`${{ needs.prepare.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** ${{ steps.create_release.outputs.html_url }}" >> $GITHUB_STEP_SUMMARY
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 4: NOTIFY - Send notifications (optional)
+  # ════════════════════════════════════════════════════════════════════════════
+  notify:
+    name: 📢 Notify
+    runs-on: self-hosted
+    needs: [prepare, build, release]
+    if: always() && needs.build.result != 'cancelled'
+    timeout-minutes: 5
+
+    steps:
+      - name: "📊 Create workflow summary"
+        run: |
+          echo "# 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Prepare | ${{ needs.prepare.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build | ${{ needs.build.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | ${{ needs.release.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build.result }}" = "success" ]; then
+            echo "## 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "- **Firmware:** \`${{ needs.build.outputs.firmware_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Size:** ${{ needs.build.outputs.firmware_size }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Duration:** ${{ needs.build.outputs.build_duration }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: "✅ Success notification"
+        if: needs.build.result == 'success'
+        run: |
+          echo "✅ Build completed successfully!"
+          echo "📦 Artifact: ${{ needs.build.outputs.artifact_name }}"
+
+      - name: "❌ Failure notification"
+        if: needs.build.result == 'failure'
+        run: |
+          echo "::error::Build failed! Check the logs for details."
+          echo "❌ Build failed for ${{ env.DEVICE_NAME }}"
