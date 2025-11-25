@@ -15,10 +15,6 @@ on:
       - "*.config"
       - "files/**"
       - ".github/workflows/build-openwrt.yaml"
-    paths-ignore:
-      - "**.md"
-      - "LICENSE"
-      - ".gitignore"
 
   # Trigger on pull requests (for testing)
   pull_request:
